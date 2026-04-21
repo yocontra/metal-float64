@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: soft_fp64
+Description: Portable bit-exact IEEE-754 binary64 soft-float
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lsoft_fp64
+Cflags: -I${includedir}

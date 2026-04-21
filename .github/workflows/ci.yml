@@ -1,0 +1,434 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily fuzz run at 06:00 UTC.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Cross-platform / cross-compiler build + ctest.
+  # ---------------------------------------------------------------------------
+  build-and-test:
+    name: build-test (${{ matrix.os }}, ${{ matrix.build_type }}${{ matrix.compiler && format(', {0}', matrix.compiler) || '' }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-22.04 is intentionally out: its libmpfr 4.1 lacks
+        # mpfr_powr / mpfr_sinpi / mpfr_cospi / mpfr_tanpi / mpfr_asinpi /
+        # mpfr_acospi / mpfr_atanpi / mpfr_atan2pi / mpfr_rootn_ui — all
+        # added in MPFR 4.2 (Ubuntu 24.04+). The test oracles use those
+        # entry points and there's no honest way to skip them while still
+        # claiming precision tiers on the functions they cover.
+        #
+        # macos-13 is out: GitHub has wound down the Intel macOS fleet and
+        # that runner queues for hours. soft_fp64 has no architecture-
+        # specific code (every op goes through integer bit manipulation),
+        # so x86_64 coverage from the Linux matrix is sufficient; macos-14
+        # (Apple Silicon) is what the bench baseline and release artifacts
+        # target.
+        os: [macos-14, ubuntu-24.04]
+        build_type: [Debug, Release]
+        compiler: [default]
+        include:
+          - os: ubuntu-24.04
+            build_type: Debug
+            compiler: clang
+          - os: ubuntu-24.04
+            build_type: Release
+            compiler: clang
+          - os: ubuntu-24.04
+            build_type: Debug
+            compiler: gcc
+          - os: ubuntu-24.04
+            build_type: Release
+            compiler: gcc
+        exclude:
+          # The Linux `default` compiler entries are redundant with the
+          # explicit clang/gcc matrix rows above.
+          - os: ubuntu-24.04
+            compiler: default
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        run: brew install mpfr gmp
+
+      - name: Install MPFR + GMP (Linux)
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpfr-dev libgmp-dev
+
+      - name: Select compiler (Linux)
+        if: startsWith(matrix.os, 'ubuntu-')
+        id: cc
+        run: |
+          case "${{ matrix.compiler }}" in
+            clang)
+              # Ubuntu 22.04 ships clang-15; 24.04 ships clang-18. Use the
+              # unversioned symlink on both.
+              echo "CC=clang"   >> "$GITHUB_ENV"
+              echo "CXX=clang++" >> "$GITHUB_ENV"
+              ;;
+            gcc)
+              echo "CC=gcc"     >> "$GITHUB_ENV"
+              echo "CXX=g++"    >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "unknown compiler ${{ matrix.compiler }}"; exit 1;;
+          esac
+
+      - name: Configure
+        run: |
+          cmake -B build -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            ${CC:+-DCMAKE_C_COMPILER=$CC} \
+            ${CXX:+-DCMAKE_CXX_COMPILER=$CXX}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build -V --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # 2. ASan + UBSan (single config — no threading, so no TSan; MSan deferred).
+  # ---------------------------------------------------------------------------
+  sanitizers:
+    name: sanitizers (asan+ubsan)
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+      CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+      CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+      LDFLAGS: "-fsanitize=address,undefined"
+      # MPFR's internal caches allocate objects that live past main() — skip
+      # leak detection. Halt on any other ASan/UBSan report.
+      ASAN_OPTIONS: "halt_on_error=1:abort_on_error=1:detect_leaks=0"
+      UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpfr-dev libgmp-dev
+
+      - name: Configure
+        run: |
+          cmake -B build -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DSOFT_FP64_WERROR=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build -V --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # 3. libFuzzer nightly. Also triggerable manually.
+  # ---------------------------------------------------------------------------
+  fuzz:
+    name: fuzz (nightly)
+    # Skip on normal push/PR — only runs on schedule + manual dispatch.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpfr-dev libgmp-dev
+
+      - name: Configure (fuzz build)
+        run: |
+          cmake -B build-fuzz -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DSOFT_FP64_BUILD_FUZZ=ON \
+            -DSOFT_FP64_WERROR=OFF
+
+      - name: Build
+        run: cmake --build build-fuzz --parallel
+
+      - name: Run all fuzz_* targets for 60s each
+        run: |
+          shopt -s nullglob
+          fails=0
+          for bin in build-fuzz/fuzz/fuzz_*; do
+            [ -x "$bin" ] || continue
+            name=$(basename "$bin")
+            echo "::group::$name"
+            if ! "$bin" -max_total_time=60 -print_final_stats=1; then
+              echo "::error::$name crashed or reported a finding"
+              fails=$((fails + 1))
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$fails" -ne 0 ]; then
+            echo "::error::$fails fuzz target(s) reported findings"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 4. Coverage (lcov, fail < 85% line coverage).
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    # Use gcc for this job specifically: Ubuntu 24.04 ships gcc-13 + gcov-13
+    # (matching .gcda format), but clang-18's --coverage emits an older gcov
+    # format that geninfo / lcov can't parse. Mixing compilers would require
+    # wiring `llvm-cov gcov` as a `--gcov-tool` shim, which lcov 2.x's
+    # geninfo calls before the shim takes effect. Simpler to use gcc.
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP + lcov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpfr-dev libgmp-dev lcov
+
+      - name: Configure (coverage)
+        run: |
+          cmake -B build -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_C_FLAGS="--coverage" \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -DSOFT_FP64_WERROR=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Capture coverage
+        run: |
+          lcov --capture --directory build \
+               --output-file coverage.info \
+               --ignore-errors mismatch,gcov,source
+          lcov --remove coverage.info \
+               '/usr/*' '*/tests/*' '*/_deps/*' \
+               --output-file coverage.cleaned \
+               --ignore-errors unused
+
+      - name: Summary + 85% gate
+        run: |
+          lcov --summary coverage.cleaned | tee cov.summary
+          pct=$(awk '/lines\.*:/ {gsub("%",""); print $2; exit}' cov.summary)
+          echo "line-coverage=${pct}%"
+          awk -v p="$pct" 'BEGIN { if (p+0 < 85.0) { print "coverage " p "% < 85% gate"; exit 1 } }'
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage.cleaned
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 5. Bench regression gate. PR-only, enforcing. macos-14 runner is dedicated
+  # Apple M-series — matches the committed bench/baseline.json. Threshold is
+  # 0.20 (20%) to absorb shared-runner jitter without letting real regressions
+  # land silently; Linux CI runners are too noisy for μs-scale timings so the
+  # gate is macos-only. If the shared runner drifts further, tighten the
+  # threshold or refresh the baseline in the same commit — do NOT revert to
+  # advisory.
+  # ---------------------------------------------------------------------------
+  bench-regression:
+    name: bench regression
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP
+        run: brew install mpfr gmp
+
+      - name: Configure (bench Release)
+        run: |
+          cmake -B build-bench -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSOFT_FP64_BUILD_BENCH=ON
+
+      - name: Build
+        run: cmake --build build-bench --parallel --target bench_soft_fp64
+
+      - name: Run bench
+        run: build-bench/bench/bench_soft_fp64 --min-time-ms=500 --json > current.json
+
+      - name: Compare vs baseline
+        run: python3 bench/compare.py current.json bench/baseline.json --threshold=0.20
+
+      - name: Upload bench JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-current
+          path: current.json
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 6. Install smoke test — verifies cmake --install + find_package + pkg-config.
+  # ---------------------------------------------------------------------------
+  install-smoke:
+    name: install smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpfr-dev libgmp-dev
+
+      - name: Run install smoke
+        run: bash scripts/test_install.sh
+
+      - name: Verify ABI surface (only sf64_* symbols exported)
+        # Fails if the archive exports any non-`sf64_*` public symbol.
+        # `__clang_call_terminate` is a compiler-emitted intrinsic and is
+        # the only allowed exception. Hidden-visibility cores (added via
+        # -fvisibility=hidden on the library target) show in `nm -g` on
+        # static archives because all defined symbols are listed; the
+        # enforcement that actually matters is that they're `private external`
+        # in the object files (checked during a downstream shared-object
+        # build). The grep below holds the public archive surface honest.
+        run: |
+          cmake -S . -B build-abi -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-abi --target soft_fp64 --parallel
+          leaked=$(nm -g --defined-only build-abi/libsoft_fp64.a \
+                   | grep -E '^[0-9a-f]+ [TRBDS] ' \
+                   | grep -Ev ' _?sf64_' \
+                   | grep -Ev '_clang_call_terminate' \
+                   | grep -Ev '_?sf64_internal_' || true)
+          if [ -n "$leaked" ]; then
+            echo "ABI leak — non-sf64 symbols exported:"
+            echo "$leaked"
+            exit 1
+          fi
+          echo "ABI surface clean."
+
+  # ---------------------------------------------------------------------------
+  # 7. clang-format lint. Pinned to clang-format-19 for deterministic output;
+  # different clang-format versions disagree on whitespace/indent-PP rules, so
+  # the lint rule locks a single version that matches the committed tree.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format-19 (pinned)
+        run: |
+          sudo apt-get update
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/apt.llvm.org.gpg
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-19.list
+          sudo apt-get update
+          sudo apt-get install -y clang-format-19
+      - name: clang-format-19 check
+        # Vendored third-party trees are checked in verbatim — never
+        # reformat them.
+        run: |
+          find include src tests fuzz bench \
+              \( -path 'tests/testfloat/vendor' -o -path 'bench/external' \) -prune -o \
+              \( -name '*.h' -o -name '*.cpp' \) -print \
+            | xargs clang-format-19 --dry-run --Werror
+
+  # ---------------------------------------------------------------------------
+  # 8. Comparative bench vs Berkeley SoftFloat 3e and ckormanyos/soft_double.
+  # Not a regression gate — the comparison libraries have no committed
+  # baseline, and shared-runner jitter would swamp anything tight enough to
+  # be useful. Produces a JSON artifact per run; on tag push the artifact
+  # is also uploaded to the release notes via `gh release upload`.
+  #
+  # Runs on manual dispatch only — informational, not a gate.
+  # ---------------------------------------------------------------------------
+  comparative-bench:
+    name: comparative bench (vs SoftFloat / soft_double)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP
+        run: brew install mpfr gmp
+
+      - name: Fetch comparison libraries
+        run: bash bench/fetch_external.sh
+
+      - name: Configure (Release)
+        run: |
+          cmake -B build-compare -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSOFT_FP64_BUILD_BENCH=ON
+
+      - name: Build bench_compare
+        run: cmake --build build-compare --target bench_compare --parallel
+
+      - name: Run bench_compare
+        run: build-compare/bench/bench_compare --min-time-ms=500 --json > compare.json
+
+      - name: Upload comparative JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-compare-${{ github.sha }}
+          path: compare.json
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # 9. Doxygen HTML build. Runs on every push/PR with WARN_AS_ERROR so doc
+  # drift (missing @param, unbalanced @{ ... @}, dangling @ref) is caught at
+  # the same tier as clang-format. Pinned to doxygen 1.12.0+ (Ubuntu 24.04
+  # apt ships 1.9.8 which predates some of the relaxed Markdown-in-brief
+  # handling; the `sudo apt install` below lands 1.9.8 — if that changes
+  # the Doxyfile, bump to a manual install).
+  # ---------------------------------------------------------------------------
+  docs:
+    name: docs (doxygen)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen
+
+      - name: Build HTML docs
+        run: doxygen Doxyfile
+
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-html
+          path: docs/html
+          retention-days: 30

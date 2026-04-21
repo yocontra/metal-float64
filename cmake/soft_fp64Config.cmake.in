@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+# soft_fp64 is a self-contained static library — no transitive dependencies.
+# All we need to do is pull in the exported targets and confirm components.
+
+include("${CMAKE_CURRENT_LIST_DIR}/soft_fp64Targets.cmake")
+
+check_required_components(soft_fp64)

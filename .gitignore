@@ -1,0 +1,23 @@
+build/
+build-*/
+cmake-build-*/
+docs/
+.cache/
+.DS_Store
+.vscode/
+.idea/
+*.o
+*.a
+*.dylib
+*.so
+*.bc
+*.ll
+compile_commands.json
+
+# Vendored comparison libraries (cloned by bench/fetch_external.sh).
+bench/external/
+
+# Claude worktrees / local metadata
+.claude/
+.worktrees/
+CLAUDE.md

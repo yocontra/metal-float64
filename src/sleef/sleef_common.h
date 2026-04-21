@@ -1,0 +1,241 @@
+#pragma once
+//
+// Derived from SLEEF 3.6 (Boost-1.0); see src/sleef/NOTICE for the full
+// license text, upstream URL, and pinned commit SHA.
+//
+// Double-double (DD) arithmetic primitives and bit helpers shared across
+// the per-family SLEEF translation units. Every routine here performs ALL
+// arithmetic through the `sf64_*` symbols — no host FPU operations are
+// emitted.
+//
+// SPDX-License-Identifier: BSL-1.0 AND MIT
+//
+// A DD number represents a value as an unevaluated sum `x = hi + lo`, where
+// |lo| <= ulp(hi) / 2. This gives us ~106 bits of precision using two IEEE
+// binary64 limbs — enough to carry Cody-Waite and Payne-Hanek range-reduced
+// arguments without losing low-order bits.
+//
+
+#include "../../include/soft_fp64/defines.h"
+#include "../../include/soft_fp64/soft_f64.h"
+
+#include <cstdint>
+
+namespace soft_fp64::sleef {
+
+// ---- bit helpers --------------------------------------------------------
+
+SF64_ALWAYS_INLINE uint64_t bits_of(double x) noexcept {
+    // SAFETY: double and uint64_t are the same size with no padding; this
+    // is a bit-level reinterpret, not a value conversion.
+    return __builtin_bit_cast(uint64_t, x);
+}
+
+SF64_ALWAYS_INLINE double from_bits(uint64_t b) noexcept {
+    // SAFETY: double and uint64_t are the same size with no padding; this
+    // is a bit-level reinterpret, not a value conversion.
+    return __builtin_bit_cast(double, b);
+}
+
+SF64_ALWAYS_INLINE bool isnan_(double x) noexcept {
+    const uint64_t b = bits_of(x);
+    return ((b >> 52) & 0x7FF) == 0x7FF && (b & 0x000FFFFFFFFFFFFFULL) != 0;
+}
+
+SF64_ALWAYS_INLINE bool isinf_(double x) noexcept {
+    const uint64_t b = bits_of(x);
+    return ((b >> 52) & 0x7FF) == 0x7FF && (b & 0x000FFFFFFFFFFFFFULL) == 0;
+}
+
+SF64_ALWAYS_INLINE bool signbit_(double x) noexcept {
+    return (bits_of(x) >> 63) != 0;
+}
+
+SF64_ALWAYS_INLINE bool is_neg_zero(double x) noexcept {
+    return bits_of(x) == 0x8000000000000000ULL;
+}
+
+SF64_ALWAYS_INLINE double neg(double x) noexcept {
+    return sf64_neg(x);
+}
+SF64_ALWAYS_INLINE double abs_(double x) noexcept {
+    return sf64_fabs(x);
+}
+
+// Integer power-of-two multiplier — uses sf64_ldexp so no host FPU.
+SF64_ALWAYS_INLINE double pow2i(int q) noexcept {
+    // 1.0 * 2^q via ldexp.
+    return sf64_ldexp(1.0, q);
+}
+
+// Extract the high 32 mantissa bits (used by Dekker's upper()).
+SF64_ALWAYS_INLINE double upper(double d) noexcept {
+    // Clear the low 27 mantissa bits so `upper(d) * upper(d)` fits in a
+    // double without rounding — Dekker's classic trick.
+    // SAFETY: masking bits of a double and reinterpreting; the exponent
+    // field is untouched so the value stays in [d/2, 2d] magnitude range.
+    const uint64_t mask = 0xFFFFFFFFF8000000ULL; // clear low 27 bits
+    return from_bits(bits_of(d) & mask);
+}
+
+// Multiply-add: SLEEF `mla(x, y, z) = x*y + z`.
+SF64_ALWAYS_INLINE double mla(double x, double y, double z) noexcept {
+    return sf64_fma(x, y, z);
+}
+
+// Multiply-subtract: SLEEF `mlapn(x, y, z) = x*y - z`.
+SF64_ALWAYS_INLINE double mlapn(double x, double y, double z) noexcept {
+    return sf64_fma(x, y, sf64_neg(z));
+}
+
+// Integer-valued rounding: floor, via sf64_floor.
+SF64_ALWAYS_INLINE double rint_(double x) noexcept {
+    return sf64_rint(x);
+}
+
+SF64_ALWAYS_INLINE double trunc_(double x) noexcept {
+    return sf64_trunc(x);
+}
+
+// ---- Horner polynomial evaluation --------------------------------------
+//
+// poly_n(x, c[n-1], c[n-2], …, c[0]) evaluates
+//     c[n-1] + x * (c[n-2] + x * ( … + x * c[0] ))
+// expressed as nested sf64_fma calls. The caller supplies the coefficients
+// in Horner order (highest-degree first).
+
+SF64_ALWAYS_INLINE double poly2(double x, double c1, double c0) noexcept {
+    return mla(x, c1, c0);
+}
+
+SF64_ALWAYS_INLINE double poly3(double x, double c2, double c1, double c0) noexcept {
+    return mla(x, mla(x, c2, c1), c0);
+}
+
+SF64_ALWAYS_INLINE double poly4(double x, double c3, double c2, double c1, double c0) noexcept {
+    return mla(x, mla(x, mla(x, c3, c2), c1), c0);
+}
+
+SF64_ALWAYS_INLINE double poly_array(double x, const double* coeffs, int n) noexcept {
+    // coeffs[0] is the highest-degree term.
+    double acc = coeffs[0];
+    for (int i = 1; i < n; ++i) {
+        acc = mla(x, acc, coeffs[i]);
+    }
+    return acc;
+}
+
+// ---- double-double --------------------------------------------------
+
+struct DD {
+    double hi;
+    double lo;
+};
+
+SF64_ALWAYS_INLINE DD dd(double h, double l) noexcept {
+    return DD{h, l};
+}
+
+// ddadd2: Knuth's TwoSum with no precondition on |hi| >= |lo|.
+SF64_ALWAYS_INLINE DD ddadd2_dd_dd(DD a, DD b) noexcept {
+    const double s = sf64_add(a.hi, b.hi);
+    const double bb = sf64_sub(s, a.hi);
+    const double err = sf64_add(sf64_sub(a.hi, sf64_sub(s, bb)), sf64_sub(b.hi, bb));
+    return DD{s, sf64_add(err, sf64_add(a.lo, b.lo))};
+}
+
+SF64_ALWAYS_INLINE DD ddadd2_dd_d_d(double a, double b) noexcept {
+    const double s = sf64_add(a, b);
+    const double bb = sf64_sub(s, a);
+    const double err = sf64_add(sf64_sub(a, sf64_sub(s, bb)), sf64_sub(b, bb));
+    return DD{s, err};
+}
+
+SF64_ALWAYS_INLINE DD ddadd2_dd_dd_d(DD a, double b) noexcept {
+    const double s = sf64_add(a.hi, b);
+    const double bb = sf64_sub(s, a.hi);
+    const double err = sf64_add(sf64_sub(a.hi, sf64_sub(s, bb)), sf64_sub(b, bb));
+    return DD{s, sf64_add(err, a.lo)};
+}
+
+SF64_ALWAYS_INLINE DD ddadd2_dd_d_dd(double a, DD b) noexcept {
+    const double s = sf64_add(a, b.hi);
+    const double bb = sf64_sub(s, a);
+    const double err = sf64_add(sf64_sub(a, sf64_sub(s, bb)), sf64_sub(b.hi, bb));
+    return DD{s, sf64_add(err, b.lo)};
+}
+
+// ddmul with FMA. Uses Dekker's `hi*lo` via one FMA for the correction.
+SF64_ALWAYS_INLINE DD ddmul_dd_d_d(double a, double b) noexcept {
+    const double hi = sf64_mul(a, b);
+    const double lo = sf64_fma(a, b, sf64_neg(hi));
+    return DD{hi, lo};
+}
+
+SF64_ALWAYS_INLINE DD ddmul_dd_dd_d(DD a, double b) noexcept {
+    const double hi = sf64_mul(a.hi, b);
+    const double lo = sf64_fma(a.hi, b, sf64_neg(hi));
+    return DD{hi, sf64_fma(a.lo, b, lo)};
+}
+
+SF64_ALWAYS_INLINE DD ddmul_dd_dd_dd(DD a, DD b) noexcept {
+    const double hi = sf64_mul(a.hi, b.hi);
+    double lo = sf64_fma(a.hi, b.hi, sf64_neg(hi));
+    lo = sf64_fma(a.lo, b.hi, lo);
+    lo = sf64_fma(a.hi, b.lo, lo);
+    return DD{hi, lo};
+}
+
+// ddsqu (square) with FMA.
+SF64_ALWAYS_INLINE DD ddsqu_dd_dd(DD a) noexcept {
+    const double hi = sf64_mul(a.hi, a.hi);
+    double lo = sf64_fma(a.hi, a.hi, sf64_neg(hi));
+    const double twolo = sf64_add(a.lo, a.lo);
+    lo = sf64_fma(a.hi, twolo, lo);
+    return DD{hi, lo};
+}
+
+// Reciprocal: 1/b expressed as DD using Newton correction.
+SF64_ALWAYS_INLINE DD ddrec_dd_d(double b) noexcept {
+    const double t = sf64_div(1.0, b);
+    const double u = sf64_fma(sf64_neg(t), b, 1.0);
+    // lo = t * u  (approximation; adequate for our tolerances)
+    return DD{t, sf64_mul(t, u)};
+}
+
+SF64_ALWAYS_INLINE DD ddrec_dd_dd(DD b) noexcept {
+    const double t = sf64_div(1.0, b.hi);
+    double u = sf64_fma(sf64_neg(t), b.hi, 1.0);
+    u = sf64_fma(sf64_neg(t), b.lo, u);
+    return DD{t, sf64_mul(t, u)};
+}
+
+// Division.
+SF64_ALWAYS_INLINE DD dddiv_dd_dd_dd(DD n, DD d) noexcept {
+    const DD r = ddrec_dd_dd(d);
+    return ddmul_dd_dd_dd(n, r);
+}
+
+// Normalise (renormalise hi+lo so |lo| <= ulp(hi)/2).
+SF64_ALWAYS_INLINE DD ddnormalize_dd_dd(DD a) noexcept {
+    const double s = sf64_add(a.hi, a.lo);
+    const double e = sf64_add(sf64_sub(a.hi, s), a.lo);
+    return DD{s, e};
+}
+
+// Convert a DD to a single double (just return hi + lo).
+SF64_ALWAYS_INLINE double dd_to_d(DD a) noexcept {
+    return sf64_add(a.hi, a.lo);
+}
+
+// ddscale_dd_dd_d: multiply a DD by a power of two (lossless since the
+// mantissa doesn't change, only the exponent).
+SF64_ALWAYS_INLINE DD ddscale_dd_dd_d(DD d, double s) noexcept {
+    return DD{sf64_mul(d.hi, s), sf64_mul(d.lo, s)};
+}
+
+SF64_ALWAYS_INLINE DD ddneg_dd_dd(DD a) noexcept {
+    return DD{sf64_neg(a.hi), sf64_neg(a.lo)};
+}
+
+} // namespace soft_fp64::sleef

@@ -1,0 +1,89 @@
+soft-fp64
+Copyright (c) 2026 Eric Schoffstall
+
+Licensed under the MIT License. See LICENSE for details.
+
+
+================================================================================
+Third-party attributions
+================================================================================
+
+This project incorporates or adapts code from the following upstream projects.
+Their original copyright notices are preserved and their license terms apply
+to the adapted portions.
+
+--------------------------------------------------------------------------------
+philipturner/metal-float64 — initial repo skeleton
+--------------------------------------------------------------------------------
+
+    https://github.com/philipturner/metal-float64
+    Copyright (c) 2023 Philip Turner
+    Licensed under the MIT License
+
+The initial repo layout (directory structure, CMake package skeleton, the
+`sf64_*` C ABI-first shape) was seeded from this project. No source files
+from the upstream are carried in the shipped library: every `sf64_*`
+implementation — arithmetic, compare, convert, sqrt/fma, rounding,
+classify, trig/exp/log/hyp/pow, special functions — is either original
+or ported from Mesa / SLEEF / SoftFloat as attributed below.
+
+--------------------------------------------------------------------------------
+Mesa3D — arithmetic / compare / convert / sqrt / fma / rounding
+--------------------------------------------------------------------------------
+
+    src/compiler/glsl/float64.glsl
+    https://gitlab.freedesktop.org/mesa/mesa
+    Copyright (c) The Mesa 3D Graphics Library project contributors
+    Licensed under the BSD-3-Clause License
+
+    src/compiler/nir/nir_lower_double_ops.c
+    https://gitlab.freedesktop.org/mesa/mesa
+    Copyright (c) The Mesa 3D Graphics Library project contributors
+    Licensed under the MIT License
+
+Algorithms for add/sub/mul/div/rem, sqrt, fma, the full conversion matrix,
+and the rounding helpers (rcp, rsqrt, floor/ceil/trunc/rint/etc.) were ported
+from these files. Restructured from GLSL to scalar C++ where needed; the
+underlying bit-manipulation algorithms are preserved.
+
+--------------------------------------------------------------------------------
+SLEEF — transcendentals
+--------------------------------------------------------------------------------
+
+    sleefinline_purec_scalar.h and scalar sources under src/libm/
+    https://github.com/shibatch/sleef
+    Copyright (c) 2010-2023 Naoki Shibata and contributors
+    Licensed under the Boost Software License, Version 1.0
+
+sin/cos/tan, asin/acos/atan/atan2, exp/exp2/exp10/expm1, log/log2/log10/log1p,
+sinh/cosh/tanh/asinh/acosh/atanh, pow, cbrt, erf/erfc, tgamma/lgamma, fmod,
+remainder. The purec-scalar variant compiles against plain `double` plus
+`fma` and `sqrt`, so the SLEEF sources drop straight onto the `sf64_*` ABI.
+
+--------------------------------------------------------------------------------
+Berkeley SoftFloat 3e — design reference
+--------------------------------------------------------------------------------
+
+    http://www.jhauser.us/arithmetic/SoftFloat.html
+    Copyright (c) The Regents of the University of California.
+    Licensed under the BSD 3-Clause License
+
+Consulted for design (round-and-pack structure, canonical NaN payload
+handling, conversion-matrix ABI shape). Additionally vendored under
+tests/testfloat/vendor/berkeley-softfloat-3/ for use as a differential
+test oracle; it is linked only into the test binary, never into the
+runtime `soft_fp64` library. Original COPYING preserved in the vendor
+subtree.
+
+--------------------------------------------------------------------------------
+Berkeley TestFloat 3e — test oracle
+--------------------------------------------------------------------------------
+
+    http://www.jhauser.us/arithmetic/TestFloat.html
+    Copyright (c) The Regents of the University of California.
+    Licensed under the BSD 3-Clause License
+
+Vendored under tests/testfloat/vendor/berkeley-testfloat-3/ as a bit-exact
+IEEE-754 conformance oracle. Linked only into the test binary. Original
+COPYING preserved in the vendor subtree.
+
