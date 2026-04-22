@@ -230,6 +230,17 @@ struct Stats {
     int checked = 0;
     int nan_mismatch = 0;
     int inf_mismatch = 0;
+    // Trivial matches: both impl and oracle returned the SAME NaN-or-
+    // signed-infinity. These contribute nothing to precision verification
+    // — they only confirm that the algorithm overflows / NaN-propagates
+    // the same way the oracle does, not that it computes precise values
+    // anywhere in its claimed range. A sweep whose sampling strategy
+    // collapses most inputs into the degenerate regime (e.g. linear
+    // sampling across `[1e-100, 1e100]` — almost every sample lands at
+    // ~1e100 and pow overflows on almost every one) will have a high
+    // trivial_matches ratio and is not actually testing its claim.
+    // Gated at 25% in fail().
+    int trivial_matches = 0;
     Tier tier = Tier::U10;
 };
 
@@ -246,8 +257,10 @@ void record(Stats& s, double x, double y, double got, double expect) {
         }
         return;
     }
-    if (gnan && enan)
+    if (gnan && enan) {
+        s.trivial_matches++;
         return;
+    }
 
     const bool ginf = std::isinf(got);
     const bool einf = std::isinf(expect);
@@ -257,6 +270,13 @@ void record(Stats& s, double x, double y, double got, double expect) {
     }
     if (ginf && einf && (got > 0) != (expect > 0)) {
         s.inf_mismatch++;
+        return;
+    }
+    if (ginf && einf) {
+        // Both sides are ±inf with matching sign. The algorithm and the
+        // oracle agree that this input overflows, but we learn nothing
+        // about precision here.
+        s.trivial_matches++;
         return;
     }
 
@@ -271,21 +291,42 @@ void record(Stats& s, double x, double y, double got, double expect) {
 }
 
 void report(const Stats& s) {
-    std::printf("  %-10s  n=%-6d  max_ulp=%-8lld  tier=%-6lld  "
+    const double trivial_pct =
+        s.checked > 0 ? (100.0 * static_cast<double>(s.trivial_matches) / s.checked) : 0.0;
+    std::printf("  %-10s  n=%-6d  max_ulp=%-8lld  tier=%-6lld  trivial=%5.1f%%  "
                 "worst x=%.17g y=%.17g got=%.17g expect=%.17g\n",
                 s.name, s.checked, static_cast<long long>(s.max_ulp),
-                static_cast<long long>(static_cast<int64_t>(s.tier)), s.worst_x, s.worst_y,
-                s.worst_got, s.worst_expect);
+                static_cast<long long>(static_cast<int64_t>(s.tier)), trivial_pct, s.worst_x,
+                s.worst_y, s.worst_got, s.worst_expect);
     if (s.nan_mismatch || s.inf_mismatch) {
         std::printf("    !! nan_mismatch=%d inf_mismatch=%d\n", s.nan_mismatch, s.inf_mismatch);
     }
 }
+
+// Trivial-match gate threshold. A sweep whose sampling regime causes
+// more than this fraction of samples to collapse into (NaN,NaN) or
+// matching-sign (inf,inf) is not actually testing precision in its
+// advertised range — the "n=10000" headline turns into "n=2500
+// precision checks plus 7500 overflow confirmations."
+constexpr double kTrivialMatchMaxRatio = 0.25;
 
 bool fail(const Stats& s) {
     if (s.nan_mismatch > 0 || s.inf_mismatch > 0)
         return true;
     if (s.max_ulp > static_cast<int64_t>(s.tier))
         return true;
+    if (s.checked > 0) {
+        const double ratio = static_cast<double>(s.trivial_matches) / s.checked;
+        if (ratio > kTrivialMatchMaxRatio) {
+            std::printf("    !! trivial-match gate: %d/%d = %.1f%% > %.0f%% — sampling regime "
+                        "collapses into overflow/underflow/NaN for the majority of inputs; the "
+                        "sweep is not actually testing precision in the advertised range.\n",
+                        s.trivial_matches, s.checked,
+                        100.0 * static_cast<double>(s.trivial_matches) / s.checked,
+                        100.0 * kTrivialMatchMaxRatio);
+            return true;
+        }
+    }
     return false;
 }
 
@@ -338,6 +379,34 @@ Stats sweep2_uniform(const char* name, Tier tier, SoftFn soft, Mpfr2 mref, doubl
     for (int i = 0; i < N_RAND; ++i) {
         const double x = rng.uniform(xlo, xhi);
         const double y = rng.uniform(ylo, yhi);
+        record(s, x, y, soft(x, y), ref2(mref, x, y));
+    }
+    return s;
+}
+
+// 2-arg sweep, log-uniform in both arguments. Bounds are magnitudes
+// (strictly positive). `x_sym` / `y_sym` flip half the samples to the
+// negative side — needed for ranges that advertise coverage across zero.
+// Use this instead of sweep2_uniform for wide-decade windows: linear
+// sampling over `[10^-N, 10^+N]` (or `[-10^N, +10^N]`) with N≥3 puts
+// ~99% of samples in the top decade of |x|, leaving the small-|x| half
+// of the advertised window unexercised. Log sampling distributes samples
+// uniformly across decades so the whole range actually gets exercised.
+template <class SoftFn>
+Stats sweep2_log(const char* name, Tier tier, SoftFn soft, Mpfr2 mref, double xlo_abs,
+                 double xhi_abs, bool x_sym, double ylo_abs, double yhi_abs, bool y_sym,
+                 uint64_t seed = 0xC0DE4D00DULL) {
+    Stats s;
+    s.name = name;
+    s.tier = tier;
+    LCG rng(seed);
+    for (int i = 0; i < N_RAND; ++i) {
+        double x = rng.log_uniform(xlo_abs, xhi_abs);
+        if (x_sym && (rng.next() & 1))
+            x = -x;
+        double y = rng.log_uniform(ylo_abs, yhi_abs);
+        if (y_sym && (rng.next() & 1))
+            y = -y;
         record(s, x, y, soft(x, y), ref2(mref, x, y));
     }
     return s;
@@ -567,9 +636,17 @@ int main() {
     results.push_back(sweep2_uniform(
         "pow", U35, [](double x, double y) { return sf64_pow(x, y); }, mpfr_pow, 1e-6, 1e6, -50.0,
         50.0));
-    results.push_back(sweep2_uniform(
+    // pow-xbig: x log-uniform across 200 decades, y log-uniform in
+    // [1e-5, 5] with random sign so negative y is exercised. Linear
+    // sampling here would concentrate 99%+ of x samples near 1e100 and
+    // 99%+ of y samples near ±5, so pow overflows / underflows on
+    // almost every input and the sweep never exercises its advertised
+    // range. y=0 exactly is out of the log-uniform support; the zero
+    // cases are owned by tests/test_powr_ieee754.cpp (for powr) and by
+    // the boundary-aware impl.
+    results.push_back(sweep2_log(
         "pow-xbig", U35, [](double x, double y) { return sf64_pow(x, y); }, mpfr_pow, 1e-100, 1e100,
-        -5.0, 5.0, 0xA110CA7EULL));
+        /*x_sym=*/false, 1e-5, 5.0, /*y_sym=*/true, 0xA110CA7EULL));
     results.push_back(sweep2_uniform(
         "pow-ybig", U35, [](double x, double y) { return sf64_pow(x, y); }, mpfr_pow, 1e-6, 1e3,
         -100.0, 100.0, 0xB16B00B5ULL));
@@ -633,9 +710,16 @@ int main() {
         mpfr_remainder, -1e15, 1e15, 1.0, 1e10));
 
     // --- hypot ----------------------------------------------------------
-    results.push_back(sweep2_uniform(
-        "hypot", U10, [](double x, double y) { return sf64_hypot(x, y); }, mpfr_hypot, -1e150,
-        1e150, -1e150, 1e150));
+    // hypot's scaling formula must handle operands spanning the full
+    // magnitude range. Linear sampling over [-1e150, 1e150] collapses
+    // into the top decade for both axes (so almost every sample hits
+    // overflow). Log-uniform with random sign exercises every decade of
+    // |x| and |y| across the advertised range; the lower bound is
+    // `denorm_min()` so subnormal operands are in scope too.
+    results.push_back(sweep2_log(
+        "hypot", U10, [](double x, double y) { return sf64_hypot(x, y); }, mpfr_hypot,
+        std::numeric_limits<double>::denorm_min(), 1e150, /*x_sym=*/true,
+        std::numeric_limits<double>::denorm_min(), 1e150, /*y_sym=*/true, 0xBADDBADDULL));
 
     edge_spot_checks();
 
