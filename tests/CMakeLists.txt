@@ -60,6 +60,7 @@ endforeach()
 # Transcendental 1-ULP diff tests.
 set(SF64_TRANSCENDENTAL_TESTS
     test_transcendental_1ulp
+    test_powr_ieee754
 )
 
 foreach(_test IN LISTS SF64_TRANSCENDENTAL_TESTS)

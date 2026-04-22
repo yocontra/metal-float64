@@ -684,12 +684,26 @@ double sf64_log1p(double x);
  *  NaN input (other than the `x=±1` or `y=±0` exceptions above) → NaN. */
 double sf64_pow(double x, double y);
 
-/** @brief Positive-base power (OpenCL `powr`).
- *  @param x base
+/** @brief Positive-base power (IEEE 754-2019 §9.2.1 `powr`).
+ *  @param x base (must be `≥ 0`; negative base → qNaN + INVALID)
  *  @param y exponent
- *  @return `x^y` for `x ≥ 0`, else NaN.
- *  @details Stricter than @ref sf64_pow — negative base always yields NaN
- *  (no odd-integer-exponent escape). Same precision guarantee as @ref sf64_pow. */
+ *  @return `x^y` with strict §9.2.1 domain semantics.
+ *  @details Stricter than @ref sf64_pow — every degenerate case returns
+ *  qNaN, not 1. Exceptional cases per IEEE 754-2019 §9.2.1:
+ *    - `powr(NaN, y)` = `powr(x, NaN)` = qNaN (quiet propagation).
+ *    - `powr(x<0, y)` = qNaN + INVALID.
+ *    - `powr(±0, ±0)` = qNaN + INVALID.
+ *    - `powr(+inf, ±0)` = qNaN + INVALID.
+ *    - `powr(1, ±inf)` = qNaN + INVALID.
+ *    - `powr(±0, y<0)` = `powr(±0, -inf)` = +inf + DIVBYZERO.
+ *    - `powr(±0, y>0)` = +0.
+ *    - `powr(+inf, y>0)` = +inf, `powr(+inf, y<0)` = +0.
+ *    - `powr(x>1, +inf)` = +inf, `powr(x>1, -inf)` = +0.
+ *    - `powr(0<x<1, +inf)` = +0, `powr(0<x<1, -inf)` = +inf.
+ *  `-0` is treated as a zero (not as "< 0"). Precision on the
+ *  non-degenerate interior matches @ref sf64_pow (U35 ≤ 8 ULP).
+ *  Boundary conformance is gated bit-exact by
+ *  `tests/test_powr_ieee754.cpp`. */
 double sf64_powr(double x, double y);
 
 /** @brief Integer-exponent power (IEEE `pown`).

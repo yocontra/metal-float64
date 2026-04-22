@@ -492,8 +492,45 @@ extern "C" double sf64_pow(double x, double y) {
 }
 
 extern "C" double sf64_powr(double x, double y) {
-    if (lt_(x, 0.0))
+    // IEEE 754-2019 §9.2.1 strict domain semantics. Every degenerate
+    // case returns qNaN + INVALID except the pole at x=0, y<0 (which
+    // returns +inf + DIVBYZERO). -0 is treated as a zero — `lt_` uses
+    // ordered-less-than, so -0.0 < 0.0 is false.
+    if (isnan_(x) || isnan_(y))
         return qNaN();
+    if (lt_(x, 0.0)) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
+        return qNaN();
+    }
+    const bool x_zero = eq_(x, 0.0);
+    const bool x_one = eq_(x, 1.0);
+    const bool x_inf = isinf_(x);
+    const bool y_zero = eq_(y, 0.0);
+    const bool y_inf = isinf_(y);
+    // 0^0, (+∞)^0 → qNaN
+    if ((x_zero || x_inf) && y_zero) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
+        return qNaN();
+    }
+    // 1^(±∞) → qNaN
+    if (x_one && y_inf) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
+        return qNaN();
+    }
+    // 0^(y<0) → +∞ (pole)
+    if (x_zero && lt_(y, 0.0)) {
+        SF64_FE_RAISE(SF64_FE_DIVBYZERO);
+        return soft_fp64::sleef::from_bits(0x7FF0000000000000ULL); // +inf
+    }
+    // 0^(y>0) → +0. Delegating to sf64_pow here would return -0 for
+    // odd-integer y (standard pow semantics), but powr's result is
+    // always nonneg on the positive-base half. At this point y is
+    // neither NaN nor zero nor negative, so it's strictly positive.
+    if (x_zero)
+        return 0.0;
+    // Non-exceptional: the positive-base pow limits at ±∞ match the
+    // powr spec (x>1,+∞→+∞; x>1,-∞→+0; 0<x<1,+∞→+0; 0<x<1,-∞→+∞;
+    // +∞,y>0→+∞; +∞,y<0→+0), so delegate.
     return sf64_pow(x, y);
 }
 
