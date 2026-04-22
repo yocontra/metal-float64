@@ -28,23 +28,31 @@
  *   oracle** — not aspirational u10/u35 tier labels. See each function's
  *   docstring for the measured bound.
  *
- * @section non_goals Non-goals (out of scope for v1.0)
+ * @section non_goals Non-goals
  *
- * - Signalling-NaN payload preservation (we quiet sNaN on entry).
- * - Non-RNE rounding modes (toward-zero, upward, downward). If needed, future
- *   `sf64_*_r(mode, …)` variants may land in a later release.
- * - IEEE-754 exception flags.
- * - Thread-local `fenv` state.
+ * - Signalling-NaN payload preservation (we quiet sNaN on entry; INVALID is
+ *   still raised through the @ref fenv surface when available).
  * - Complex-number math.
  * - `fp128` / `fp16` (separate project if ever needed).
  *
  * @section ieee IEEE-754 conformance
  *
  * Arithmetic and convert paths are strictly conformant to IEEE-754-2008 for
- * the default rounding mode (RNE) and for the default exception handling
- * (no flags raised, no traps). sNaN inputs are **quieted** on entry — the
- * quiet bit is forced on, and the signalling payload is not preserved.
- * Exception flags are never set. See `@ref non_goals`.
+ * round-affected ops under all five rounding attributes. The default
+ * `sf64_*` surface is round-to-nearest-ties-to-even (RNE); @ref rounding
+ * describes the additive `sf64_*_r(mode, …)` surface for the other four
+ * modes (RTZ / RUP / RDN / RNA).
+ *
+ * IEEE-754 exception flags (`INVALID`, `DIVBYZERO`, `OVERFLOW`,
+ * `UNDERFLOW`, `INEXACT`) are raised through the @ref fenv surface when
+ * `soft_fp64` is built with `SOFT_FP64_FENV=tls` (default on hosted
+ * builds). When built with `SOFT_FP64_FENV=disabled`, all `sf64_fe_*`
+ * entries become no-ops and the corresponding raise-sites are compiled
+ * out for zero runtime cost.
+ *
+ * sNaN inputs are **quieted** on entry — the quiet bit is forced on, and
+ * the signalling payload is not preserved. `INVALID` is raised on sNaN
+ * entry when fenv is enabled.
  *
  * @section abi ABI stability
  *
@@ -57,6 +65,7 @@
  */
 
 #include "defines.h"
+#include "rounding_mode.h"
 
 #include <cstdint>
 
@@ -779,6 +788,137 @@ double sf64_remainder(double x, double y);
 /** @} */
 
 /** @} */ // Transcendentals
+
+/**
+ * @name rounding Non-RNE rounding variants (`_r` surface)
+ * @brief Explicit-mode versions of every round-affected op. Default `sf64_*`
+ *        entry points are RNE; the `_r` suffix takes an @ref sf64_rounding_mode
+ *        and covers all five IEEE-754 rounding attributes.
+ *
+ * Ops whose result does not depend on the rounding attribute —
+ * @ref sf64_neg, @ref sf64_fabs, @ref sf64_copysign, the compare predicates,
+ * @ref sf64_ldexp, @ref sf64_frexp, classification, and `fmod`/`remainder` —
+ * have no `_r` variant because their semantics are either exact or defined
+ * independently of the rounding attribute.
+ *
+ * `floor`/`ceil`/`trunc`/`round` are likewise mode-fixed by definition and
+ * have no `_r` form; @ref sf64_rint has @ref sf64_rint_r because `rint` is
+ * the one user-facing rounding op whose result is mode-dependent.
+ *
+ * Bit-exactness guarantee: every `_r` entry point is bit-exact vs. IEEE-754
+ * for the requested mode, validated against MPFR 200-bit and Berkeley
+ * TestFloat 3e across all five modes.
+ * @{
+ */
+
+/** @brief Addition with explicit rounding mode. @param mode see @ref sf64_rounding_mode.
+ *  @param a addend @param b addend
+ *  @return `a + b`, bit-exact IEEE-754 under `mode`. Matches @ref sf64_add
+ *  for `SF64_RNE`. NaN / inf / zero handling is identical across modes. */
+double sf64_add_r(sf64_rounding_mode mode, double a, double b);
+/** @brief Subtraction with explicit rounding mode. @see sf64_add_r */
+double sf64_sub_r(sf64_rounding_mode mode, double a, double b);
+/** @brief Multiplication with explicit rounding mode. @see sf64_add_r */
+double sf64_mul_r(sf64_rounding_mode mode, double a, double b);
+/** @brief Division with explicit rounding mode. @see sf64_add_r */
+double sf64_div_r(sf64_rounding_mode mode, double a, double b);
+/** @brief Square root with explicit rounding mode. @see sf64_sqrt */
+double sf64_sqrt_r(sf64_rounding_mode mode, double x);
+/** @brief Fused multiply-add with explicit rounding mode. Single rounding step.
+ *  @see sf64_fma */
+double sf64_fma_r(sf64_rounding_mode mode, double a, double b, double c);
+
+/** @brief Narrow f64 → f32 with explicit rounding mode. @see sf64_to_f32 */
+float sf64_to_f32_r(sf64_rounding_mode mode, double x);
+
+/** @brief `double → int8_t` with explicit rounding mode (mode-aware rounding
+ *  of the intermediate before truncation-to-integer). `SF64_RTZ` matches
+ *  @ref sf64_to_i8. Saturation/NaN behavior identical across modes. */
+int8_t sf64_to_i8_r(sf64_rounding_mode mode, double x);
+/** @brief `double → int16_t` with explicit rounding mode. @see sf64_to_i8_r */
+int16_t sf64_to_i16_r(sf64_rounding_mode mode, double x);
+/** @brief `double → int32_t` with explicit rounding mode. @see sf64_to_i8_r */
+int32_t sf64_to_i32_r(sf64_rounding_mode mode, double x);
+/** @brief `double → int64_t` with explicit rounding mode. @see sf64_to_i8_r */
+int64_t sf64_to_i64_r(sf64_rounding_mode mode, double x);
+/** @brief `double → uint8_t` with explicit rounding mode. @see sf64_to_i8_r */
+uint8_t sf64_to_u8_r(sf64_rounding_mode mode, double x);
+/** @brief `double → uint16_t` with explicit rounding mode. @see sf64_to_i8_r */
+uint16_t sf64_to_u16_r(sf64_rounding_mode mode, double x);
+/** @brief `double → uint32_t` with explicit rounding mode. @see sf64_to_i8_r */
+uint32_t sf64_to_u32_r(sf64_rounding_mode mode, double x);
+/** @brief `double → uint64_t` with explicit rounding mode. @see sf64_to_i8_r */
+uint64_t sf64_to_u64_r(sf64_rounding_mode mode, double x);
+
+/** @brief Round-to-integer with explicit rounding mode (IEEE-754
+ *  `roundToIntegralExact`). `SF64_RNE` matches @ref sf64_rint;
+ *  `SF64_RTZ` matches @ref sf64_trunc; `SF64_RUP` matches @ref sf64_ceil;
+ *  `SF64_RDN` matches @ref sf64_floor; `SF64_RNA` matches @ref sf64_round. */
+double sf64_rint_r(sf64_rounding_mode mode, double x);
+
+/** @} */ // rounding
+
+/**
+ * @name fenv IEEE-754 exception flags (thread-local)
+ * @brief Sticky flag accumulators matching IEEE-754 §7.
+ *
+ * Flag storage is per-thread when the library is built with
+ * `SOFT_FP64_FENV=tls` (the default). When built with
+ * `SOFT_FP64_FENV=disabled`, the raise-sites are compiled out and all
+ * `sf64_fe_*` entries become zero-cost no-ops / no-op queries (getall
+ * returns 0). Bit assignments match `<fenv.h>` conventions so consumers
+ * can bridge to glibc fenv without a lookup table.
+ * @{
+ */
+
+/** @brief Exception-flag bit positions. Bitwise-OR to combine. */
+typedef enum sf64_fe_flag {
+    SF64_FE_INVALID = 1u << 0,   /**< invalid operation (NaN from non-NaN, etc.) */
+    SF64_FE_DIVBYZERO = 1u << 1, /**< division by zero (finite non-zero / 0)      */
+    SF64_FE_OVERFLOW = 1u << 2,  /**< result too large to represent              */
+    SF64_FE_UNDERFLOW = 1u << 3, /**< subnormal-or-smaller result w/ inexact      */
+    SF64_FE_INEXACT = 1u << 4,   /**< result not exactly representable            */
+} sf64_fe_flag;
+
+/** @brief Read all currently-sticky flags.
+ *  @return bitwise-OR of @ref sf64_fe_flag values for the calling thread.
+ *  Returns 0 under `SOFT_FP64_FENV=disabled`. */
+unsigned sf64_fe_getall(void);
+
+/** @brief Test whether any flag in `mask` is currently set.
+ *  @param mask bitwise-OR of @ref sf64_fe_flag values
+ *  @return `1` if `getall() & mask` is non-zero, else `0`. Returns 0 under
+ *  `SOFT_FP64_FENV=disabled`. */
+int sf64_fe_test(unsigned mask);
+
+/** @brief Set the given flags sticky for the calling thread.
+ *  @param mask bitwise-OR of @ref sf64_fe_flag values. No-op under
+ *  `SOFT_FP64_FENV=disabled`. */
+void sf64_fe_raise(unsigned mask);
+
+/** @brief Clear the given flags for the calling thread.
+ *  @param mask bitwise-OR of @ref sf64_fe_flag values. No-op under
+ *  `SOFT_FP64_FENV=disabled`. */
+void sf64_fe_clear(unsigned mask);
+
+/** @brief Opaque flag-state snapshot for save/restore. Size and alignment
+ *  are ABI-stable for the 1.x line. Under `SOFT_FP64_FENV=disabled` the
+ *  structure still exists (for caller-side ABI compatibility) but
+ *  save/restore are no-ops. */
+typedef struct sf64_fe_state_t {
+    unsigned flags;
+} sf64_fe_state_t;
+
+/** @brief Snapshot the current thread-local flag state into `out`.
+ *  @param out destination; must be non-null. */
+void sf64_fe_save(sf64_fe_state_t* out);
+
+/** @brief Restore a previously-saved flag state.
+ *  @param in source; must be non-null. Replaces (does not OR) the current
+ *  thread-local flag state. */
+void sf64_fe_restore(const sf64_fe_state_t* in);
+
+/** @} */ // fenv
 
 #ifdef __cplusplus
 } // extern "C"

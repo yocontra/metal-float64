@@ -169,6 +169,16 @@ target_compile_options(run_testfloat PRIVATE -ffp-contract=off -fno-math-errno)
 # regardless of ctest's working directory.
 target_compile_definitions(run_testfloat PRIVATE
     "SF64_TESTFLOAT_GEN_PATH=\"$<TARGET_FILE:testfloat_gen>\"")
+# Pipe the build-time fenv mode selection into the runner so it can gate
+# flag-set assertions (under `disabled` every raise is a no-op and the
+# fl2 comparison is inapplicable).
+if(SOFT_FP64_FENV STREQUAL "tls")
+    target_compile_definitions(run_testfloat PRIVATE SF64_TEST_FENV_MODE=1)
+elseif(SOFT_FP64_FENV STREQUAL "disabled")
+    target_compile_definitions(run_testfloat PRIVATE SF64_TEST_FENV_MODE=0)
+elseif(SOFT_FP64_FENV STREQUAL "explicit")
+    target_compile_definitions(run_testfloat PRIVATE SF64_TEST_FENV_MODE=2)
+endif()
 add_dependencies(run_testfloat testfloat_gen)
 
 add_test(NAME test_testfloat COMMAND run_testfloat)

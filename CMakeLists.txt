@@ -41,11 +41,29 @@ target_sources(soft_fp64 PRIVATE
     src/sqrt_fma.cpp
     src/rounding.cpp
     src/classify.cpp
+    src/fenv.cpp
     src/sleef/sleef_exp_log.cpp
     src/sleef/sleef_trig.cpp
     src/sleef/sleef_inv_hyp_pow.cpp
     src/sleef/sleef_stubs.cpp
 )
+
+# IEEE-754 exception-flag storage. `tls` uses a thread_local accumulator;
+# `disabled` compiles every raise / query to a no-op (zero-cost); `explicit`
+# is reserved for a future caller-provided state ABI.
+set(SOFT_FP64_FENV "tls" CACHE STRING
+    "Exception-flag storage: tls | disabled | explicit (reserved)")
+set_property(CACHE SOFT_FP64_FENV PROPERTY STRINGS tls disabled explicit)
+if(SOFT_FP64_FENV STREQUAL "tls")
+    target_compile_definitions(soft_fp64 PRIVATE SOFT_FP64_FENV_MODE=1)
+elseif(SOFT_FP64_FENV STREQUAL "disabled")
+    target_compile_definitions(soft_fp64 PRIVATE SOFT_FP64_FENV_MODE=0)
+elseif(SOFT_FP64_FENV STREQUAL "explicit")
+    # Reserved for 1.2+; compiles as disabled today.
+    target_compile_definitions(soft_fp64 PRIVATE SOFT_FP64_FENV_MODE=2)
+else()
+    message(FATAL_ERROR "SOFT_FP64_FENV must be tls | disabled | explicit")
+endif()
 
 # Soft-fp64 TUs must not have `a*b+c` fused into llvm.fma.f64 at -O3 —
 # fma depends on add/mul and we'd create a link-time cycle. Disable

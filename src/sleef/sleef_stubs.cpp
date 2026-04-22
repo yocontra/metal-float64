@@ -34,8 +34,14 @@ using soft_fp64::sleef::ddmul_dd_dd_dd;
 using soft_fp64::sleef::ddneg_dd_dd;
 using soft_fp64::sleef::ddrec_dd_d;
 using soft_fp64::sleef::ddscale_dd_dd_d;
+using soft_fp64::sleef::eq_;
+using soft_fp64::sleef::ge_;
+using soft_fp64::sleef::gt_;
 using soft_fp64::sleef::isinf_;
 using soft_fp64::sleef::isnan_;
+using soft_fp64::sleef::le_;
+using soft_fp64::sleef::lt_;
+using soft_fp64::sleef::ne_;
 using soft_fp64::sleef::poly_array;
 using soft_fp64::sleef::sf64_internal_expk_dd;
 using soft_fp64::sleef::sf64_internal_logk_dd;
@@ -123,7 +129,7 @@ extern "C" double sf64_rootn(double x, int n) {
     const bool n_odd = (n & 1) != 0;
 
     // rootn(±0, n): +0 or ±0 for n>0 (sign preserved for odd n), ±inf for n<0.
-    if (x == 0.0) {
+    if (eq_(x, 0.0)) {
         if (n > 0)
             return (signbit_(x) && n_odd) ? sf64_neg(0.0) : 0.0;
         // n < 0 → pole at 0.
@@ -142,7 +148,7 @@ extern "C" double sf64_rootn(double x, int n) {
     }
 
     // Negative x with even n is undefined.
-    if (x < 0.0 && !n_odd)
+    if (lt_(x, 0.0) && !n_odd)
         return qNaN();
 
     // Special cases where we can be exact.
@@ -155,7 +161,7 @@ extern "C" double sf64_rootn(double x, int n) {
 
     // General path: r = sign * exp(log|x| / n).  For |x| != 1 we can use
     // pow; for x == 1 or -1 we can short-circuit.
-    if (sf64_fabs(x) == 1.0) {
+    if (eq_(sf64_fabs(x), 1.0)) {
         return (signbit_(x) && n_odd) ? -1.0 : 1.0;
     }
 
@@ -294,11 +300,11 @@ extern "C" double sf64_erf(double x) {
     const double a = sf64_fabs(x);
     // Taylor converges well for |x| < ~0.9 with 14 terms.  Past that, use
     // the Chebyshev erfc path: erf(|x|) = 1 - erfc(|x|).
-    if (a < 0.9) {
+    if (lt_(a, 0.9)) {
         const double r = erf_small(a);
         return signbit_(x) ? sf64_neg(r) : r;
     }
-    if (a > 6.0) {
+    if (gt_(a, 6.0)) {
         // erf(|x|) ≈ 1; keep correct sign.
         return signbit_(x) ? -1.0 : 1.0;
     }
@@ -316,12 +322,12 @@ extern "C" double sf64_erfc(double x) {
     // For small |x| use 1 - erf(x) directly.  Cancellation is tolerable
     // since erf(0.9) ≈ 0.797 (leaves ~0.2 precision margin).  For |x| >= 0.9
     // switch to the Chebyshev erfc form which is cancellation-free.
-    if (a < 0.9) {
+    if (lt_(a, 0.9)) {
         const double e = erf_small(x); // uses signed x
         return sf64_sub(1.0, e);
     }
     // |x| >= 1: use Chebyshev for erfc(|x|).
-    if (a > 27.0) {
+    if (gt_(a, 27.0)) {
         // erfc underflows from the positive side; mirror for negative.
         if (signbit_(x))
             return 2.0;
@@ -450,7 +456,7 @@ double tgamma_pos(double x) {
 extern "C" double sf64_tgamma(double x) {
     if (isnan_(x))
         return qNaN();
-    if (x == 0.0) {
+    if (eq_(x, 0.0)) {
         // IEEE: tgamma(±0) = ±inf.
         return signbit_(x) ? sf64_neg(kInf) : kInf;
     }
@@ -458,21 +464,21 @@ extern "C" double sf64_tgamma(double x) {
         return signbit_(x) ? qNaN() : kInf;
     }
     // Negative integers are poles.
-    if (x < 0.0 && is_int(x))
+    if (lt_(x, 0.0) && is_int(x))
         return qNaN();
 
     // Large x overflows.
-    if (x > 171.624)
+    if (gt_(x, 171.624))
         return kInf;
 
-    if (x >= 0.5) {
+    if (ge_(x, 0.5)) {
         return tgamma_pos(x);
     }
 
     // Reflection: gamma(x) = π / (sin(πx) * gamma(1-x))
     // Use sinpi to keep argument reduction accurate.
     const double sp = sf64_sinpi(x);
-    if (sp == 0.0)
+    if (eq_(sp, 0.0))
         return qNaN();
     const double g1mx = tgamma_pos(sf64_sub(1.0, x));
     return sf64_div(kPI, sf64_mul(sp, g1mx));
@@ -491,25 +497,25 @@ extern "C" double sf64_lgamma_r(double x, int* sign) {
             *sign = 1;
         return kInf;
     }
-    if (x == 0.0) {
+    if (eq_(x, 0.0)) {
         if (sign)
             *sign = signbit_(x) ? -1 : 1;
         return kInf;
     }
 
     // Negative integers: pole → +inf, sign = 1 (libm convention).
-    if (x < 0.0 && is_int(x)) {
+    if (lt_(x, 0.0) && is_int(x)) {
         if (sign)
             *sign = 1;
         return kInf;
     }
 
-    if (x >= 0.5) {
+    if (ge_(x, 0.5)) {
         result = lgamma_pos(x);
         // gamma(x) for x>0 is positive (except the reflection cases handled
         // below); at x=0.5…, gamma > 0.
         local_sign = 1;
-    } else if (x > 0.0) {
+    } else if (gt_(x, 0.0)) {
         // 0 < x < 0.5: gamma(x) > 0 (positive infinite limit at 0+).
         // Use reflection via log to avoid catastrophic cancellation in
         // gamma itself:  lgamma(x) = log π - log|sin(πx)| - lgamma(1-x)

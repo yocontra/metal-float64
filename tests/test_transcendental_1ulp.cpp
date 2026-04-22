@@ -717,9 +717,8 @@ int main() {
         //     MPFR-referenced version lives in tests/test_coverage_mpfr.cpp.
         const double kPi = 3.14159265358979323846;
         const double ks[] = {
-            std::ldexp(1.0, 40),
-            std::ldexp(1.0, 45),
-            std::ldexp(1.0, 50),
+            std::ldexp(1.0, 40),  std::ldexp(1.0, 45),  std::ldexp(1.0, 50),
+            std::ldexp(1.0, 500), std::ldexp(1.0, 900),
         };
         const double deltas[] = {
             0.0,

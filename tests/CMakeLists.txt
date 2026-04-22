@@ -12,9 +12,11 @@ set(SF64_CORE_TESTS
     test_convert_widths
     test_sqrt_fma_exact
     test_rounding_edges
+    test_rounding_modes
     test_classify
     test_hypot_scaling
     test_reentrancy
+    test_fenv
 )
 
 find_package(Threads REQUIRED)
@@ -27,6 +29,27 @@ foreach(_test IN LISTS SF64_CORE_TESTS)
         target_compile_options(${_test} PRIVATE -ffp-contract=off -fno-math-errno)
         if(${_test} STREQUAL "test_reentrancy")
             target_link_libraries(${_test} PRIVATE Threads::Threads)
+        endif()
+        if(${_test} STREQUAL "test_fenv")
+            # test_fenv cross-thread subtest spawns std::thread workers.
+            target_link_libraries(${_test} PRIVATE Threads::Threads)
+            # Pipe the build-time fenv mode selection into the test so it
+            # can gate flag-set assertions (under `disabled` every raise is
+            # a no-op and the test becomes a surface-smoke only).
+            if(SOFT_FP64_FENV STREQUAL "tls")
+                target_compile_definitions(${_test} PRIVATE SF64_TEST_FENV_MODE=1)
+            elseif(SOFT_FP64_FENV STREQUAL "disabled")
+                target_compile_definitions(${_test} PRIVATE SF64_TEST_FENV_MODE=0)
+            elseif(SOFT_FP64_FENV STREQUAL "explicit")
+                target_compile_definitions(${_test} PRIVATE SF64_TEST_FENV_MODE=2)
+            endif()
+        endif()
+        if(${_test} STREQUAL "test_rounding_modes")
+            # Host FPU oracle under std::fesetround needs the compiler to
+            # honour the dynamic rounding mode — otherwise O2 will hoist
+            # constant arithmetic outside the fenv guard and we compare
+            # against stale RNE results.
+            target_compile_options(${_test} PRIVATE -frounding-math)
         endif()
         add_test(NAME ${_test} COMMAND ${_test})
     else()

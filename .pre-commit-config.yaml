@@ -1,0 +1,66 @@
+# Run with `prek` (https://github.com/j178/prek) — Rust drop-in for
+# pre-commit that reads this same config. Install hooks once:
+#
+#     prek install
+#
+# Run across the tree:
+#
+#     prek run --all-files
+#
+# CI also runs `prek run --all-files --show-diff-on-failure`; any diff
+# here is what lands as a red build, so run it locally before pushing.
+#
+# Vendored third-party trees are checked in verbatim and excluded to
+# match the source rule in `CLAUDE.md`.
+
+exclude: |
+  (?x)^(
+      tests/testfloat/vendor/.*|
+      bench/external/.*|
+      build.*/.*|
+      docs/.*
+  )$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+      - id: detect-private-key
+
+  # clang-format pinned to v19 — the soft_fp64 source tree is formatted
+  # by clang-format-19 and different major versions disagree on
+  # indent-PP / alignment rules. The mirror repo ships a real
+  # clang-format-19 binary, so CI and local runs agree byte-for-byte.
+  # Bump this rev and the bench/CI docs together.
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v19.1.7
+    hooks:
+      - id: clang-format
+        types_or: [c++, c]
+        files: ^(include|src|tests|fuzz|bench)/.*\.(h|cpp)$
+
+  # Mechanical guard for the "no hidden host-FPU dependency" rule in
+  # CLAUDE.md. Scans src/*.{cpp,h} (src/sleef/ excluded — the sanctioned
+  # carve-out) for libm calls, cmath/fenv includes, __builtin_ FP
+  # intrinsics, int↔double casts, and fp-contract escape pragmas.
+  # Runs on every commit that touches src/ and in CI via prek.
+  - repo: local
+    hooks:
+      - id: no-host-fp
+        name: no host-FPU dependency in src/
+        entry: scripts/check_no_host_fp.sh
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.(cpp|h)$

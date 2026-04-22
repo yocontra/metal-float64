@@ -24,6 +24,7 @@
 // SPDX-License-Identifier: BSL-1.0 AND MIT
 //
 
+#include "../internal_fenv.h"
 #include "sleef_internal.h"
 
 using soft_fp64::sleef::DD;
@@ -38,8 +39,14 @@ using soft_fp64::sleef::ddneg_dd_dd;
 using soft_fp64::sleef::ddnormalize_dd_dd;
 using soft_fp64::sleef::ddscale_dd_dd_d;
 using soft_fp64::sleef::ddsqu_dd_dd;
+using soft_fp64::sleef::eq_;
+using soft_fp64::sleef::ge_;
+using soft_fp64::sleef::gt_;
 using soft_fp64::sleef::isinf_;
 using soft_fp64::sleef::isnan_;
+using soft_fp64::sleef::le_;
+using soft_fp64::sleef::lt_;
+using soft_fp64::sleef::ne_;
 using soft_fp64::sleef::poly_array;
 using soft_fp64::sleef::sf64_internal_exp_core;
 using soft_fp64::sleef::sf64_internal_expk_dd;
@@ -67,12 +74,19 @@ using soft_fp64::sleef::detail::qNaN;
 extern "C" double sf64_fmod(double x, double y) {
     if (isnan_(x) || isnan_(y))
         return qNaN();
-    if (isinf_(x) || y == 0.0)
+    if (isinf_(x) || eq_(y, 0.0)) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
         return qNaN();
+    }
     if (isinf_(y))
         return x;
-    if (sf64_fabs(x) < sf64_fabs(y))
+    if (lt_(sf64_fabs(x), sf64_fabs(y)))
         return x;
+
+    // IEEE §5.3.1: fmod result is exact; must not raise INEXACT / UNDERFLOW
+    // from internal sf64_sub calls. Snapshot and restore around the loop.
+    sf64_fe_state_t saved;
+    sf64_fe_save(&saved);
 
     const double absx = sf64_fabs(x);
     const double absy = sf64_fabs(y);
@@ -86,10 +100,11 @@ extern "C" double sf64_fmod(double x, double y) {
     int diff = ex - ey;
     while (diff >= 0) {
         const double s = sf64_ldexp(absy, diff);
-        if (r >= s)
+        if (ge_(r, s))
             r = sf64_sub(r, s);
         diff -= 1;
     }
+    sf64_fe_restore(&saved);
     return signbit_(x) ? sf64_neg(r) : r;
 }
 
@@ -98,10 +113,17 @@ extern "C" double sf64_fmod(double x, double y) {
 extern "C" double sf64_remainder(double x, double y) {
     if (isnan_(x) || isnan_(y))
         return qNaN();
-    if (isinf_(x) || y == 0.0)
+    if (isinf_(x) || eq_(y, 0.0)) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
         return qNaN();
+    }
     if (isinf_(y))
         return x;
+
+    // IEEE §5.3.1: `remainder` is exact and raises only INVALID (handled
+    // above). Mask every spurious flag from the internal sub/div compares.
+    sf64_fe_state_t saved;
+    sf64_fe_save(&saved);
 
     const double absy = sf64_fabs(y);
     double r = sf64_fmod(x, y); // |r| <= |y|, sign of x; 0 if exact
@@ -111,15 +133,16 @@ extern "C" double sf64_remainder(double x, double y) {
     // need an exact compare. Avoids the subnormal underflow in |y|*0.5 and
     // the potential overflow in 2*|r|.
     const double d = sf64_sub(absy, absr);
-    if (absr > d) {
+    if (gt_(absr, d)) {
         r = signbit_(r) ? sf64_add(r, absy) : sf64_sub(r, absy);
-    } else if (absr == d) {
+    } else if (eq_(absr, d)) {
         // Exact tie (2|r| == |y|, r != 0). Choose even quotient.
         const double q = sf64_div(sf64_sub(x, r), y);
         if (is_odd_int(q)) {
             r = signbit_(r) ? sf64_add(r, absy) : sf64_sub(r, absy);
         }
     }
+    sf64_fe_restore(&saved);
     return r;
 }
 
@@ -162,12 +185,12 @@ inline double atan2k_core_poly(double s) {
 // eliminating the 0.414 reduction boundary that hurt the naive xatan.
 DD atan2k_u1_dd(DD y, DD x) {
     double q = 0.0;
-    if (x.hi < 0.0) {
+    if (lt_(x.hi, 0.0)) {
         x.hi = sf64_neg(x.hi);
         x.lo = sf64_neg(x.lo);
         q = -2.0;
     }
-    if (x.hi < y.hi) {
+    if (lt_(x.hi, y.hi)) {
         const DD t = x;
         x = y;
         y.hi = sf64_neg(t.hi);
@@ -185,7 +208,7 @@ DD atan2k_u1_dd(DD y, DD x) {
     DD stu = ddmul_dd_dd_d(st, u);
     DD r = ddadd2_dd_dd(s, stu);
 
-    if (q != 0.0) {
+    if (ne_(q, 0.0)) {
         DD qpi2 = ddmul_dd_d_d(q, kPI_2_HI);
         qpi2.lo = sf64_fma(q, kPI_2_LO, qpi2.lo);
         r = ddadd2_dd_dd(qpi2, r);
@@ -207,7 +230,7 @@ namespace soft_fp64::sleef {
 [[gnu::visibility("hidden")]] DD sf64_internal_logk_dd(double d) {
     int e;
     double m = sf64_frexp(d, &e);
-    if (m < 0.70710678118654752440) {
+    if (lt_(m, 0.70710678118654752440)) {
         m = sf64_mul(m, 2.0);
         e -= 1;
     }
@@ -224,13 +247,21 @@ namespace soft_fp64::sleef {
         0.222221366518767365905163, 0.285714294746548025383248, 0.399999999950799600689777,
         0.6666666666667778740063,
     };
-    const double t = poly_array(x2.hi, kLogkCoef, sizeof(kLogkCoef) / sizeof(kLogkCoef[0]));
+    // DD Horner on the full x² DD pair. Evaluating the tail polynomial in
+    // double-double carries ~100+ bits through the accumulator, compared to
+    // ~53 bits when the tail was run against `x2.hi` as a plain double.
+    DD t = DD{kLogkCoef[0], 0.0};
+    constexpr int kLogkN = sizeof(kLogkCoef) / sizeof(kLogkCoef[0]);
+    for (int i = 1; i < kLogkN; ++i) {
+        t = ddmul_dd_dd_dd(t, x2);
+        t = ddadd2_dd_dd_d(t, kLogkCoef[i]);
+    }
 
-    DD s = ddmul_dd_d_d(kL2U, static_cast<double>(e));
-    s.lo = sf64_fma(kL2L, static_cast<double>(e), s.lo);
+    DD s = ddmul_dd_d_d(kL2U, sf64_from_i64(static_cast<int64_t>(e)));
+    s.lo = sf64_fma(kL2L, sf64_from_i64(static_cast<int64_t>(e)), s.lo);
     s = ddadd2_dd_dd(s, ddscale_dd_dd_d(x, 2.0));
     DD xx2 = ddmul_dd_dd_dd(x, x2);
-    s = ddadd2_dd_dd(s, ddmul_dd_dd_d(xx2, t));
+    s = ddadd2_dd_dd(s, ddmul_dd_dd_dd(xx2, t));
     return s;
 }
 
@@ -246,9 +277,9 @@ namespace soft_fp64::sleef {
 [[gnu::visibility("hidden")]] double sf64_internal_expk_dd(DD d) {
     const double d_collapsed = sf64_add(d.hi, d.lo);
 
-    if (d_collapsed > 709.78271289338399673222)
+    if (gt_(d_collapsed, 709.78271289338399673222))
         return kInf;
-    if (d_collapsed < -1000.0)
+    if (lt_(d_collapsed, -1000.0))
         return 0.0;
 
     const double qf = sf64_rint(sf64_mul(d_collapsed, kR_LN2));
@@ -294,10 +325,10 @@ extern "C" double sf64_asin(double d) {
     if (isnan_(d))
         return qNaN();
     const double a = sf64_fabs(d);
-    if (a > 1.0)
+    if (gt_(a, 1.0))
         return qNaN();
 
-    const bool big = a > 0.5;
+    const bool big = gt_(a, 0.5);
     double x2, x;
     if (big) {
         x2 = sf64_mul(sf64_sub(1.0, a), 0.5);
@@ -329,10 +360,10 @@ extern "C" double sf64_acos(double d) {
     if (isnan_(d))
         return qNaN();
     const double a = sf64_fabs(d);
-    if (a > 1.0)
+    if (gt_(a, 1.0))
         return qNaN();
 
-    const bool big = a > 0.5;
+    const bool big = gt_(a, 0.5);
     double x2, x;
     if (big) {
         x2 = sf64_mul(sf64_sub(1.0, a), 0.5);
@@ -367,7 +398,7 @@ extern "C" double sf64_atan(double d) {
         return qNaN();
     if (isinf_(d))
         return signbit_(d) ? sf64_neg(kPI_2) : kPI_2;
-    if (d == 0.0)
+    if (eq_(d, 0.0))
         return d;
 
     DD y = dd_of(sf64_fabs(d));
@@ -381,16 +412,16 @@ extern "C" double sf64_atan2(double y, double x) {
     if (isnan_(x) || isnan_(y))
         return qNaN();
 
-    if (x == 0.0 && y == 0.0) {
+    if (eq_(x, 0.0) && eq_(y, 0.0)) {
         if (signbit_(x))
             return signbit_(y) ? sf64_neg(kPI) : kPI;
         return signbit_(y) ? sf64_neg(0.0) : 0.0;
     }
-    if (y == 0.0) {
+    if (eq_(y, 0.0)) {
         return signbit_(x) ? (signbit_(y) ? sf64_neg(kPI) : kPI)
                            : (signbit_(y) ? sf64_neg(0.0) : 0.0);
     }
-    if (x == 0.0)
+    if (eq_(x, 0.0))
         return signbit_(y) ? sf64_neg(kPI_2) : kPI_2;
 
     if (isinf_(x) && isinf_(y)) {
@@ -419,9 +450,9 @@ extern "C" double sf64_atan2(double y, double x) {
 // ========================================================================
 
 extern "C" double sf64_pow(double x, double y) {
-    if (y == 0.0)
+    if (eq_(y, 0.0))
         return 1.0;
-    if (x == 1.0)
+    if (eq_(x, 1.0))
         return 1.0;
     if (isnan_(x) || isnan_(y))
         return qNaN();
@@ -429,39 +460,39 @@ extern "C" double sf64_pow(double x, double y) {
     const bool y_is_int = is_int(y);
     const bool y_is_odd = y_is_int && is_odd_int(y);
 
-    if (x == 0.0) {
-        if (y < 0.0) {
+    if (eq_(x, 0.0)) {
+        if (lt_(y, 0.0)) {
             return (signbit_(x) && y_is_odd) ? sf64_neg(kInf) : kInf;
         }
         return (signbit_(x) && y_is_odd) ? sf64_neg(0.0) : 0.0;
     }
 
-    if (x < 0.0 && !y_is_int)
+    if (lt_(x, 0.0) && !y_is_int)
         return qNaN();
 
     if (isinf_(x)) {
-        if (x > 0.0)
-            return y > 0.0 ? kInf : 0.0;
-        const double r = y > 0.0 ? kInf : 0.0;
+        if (gt_(x, 0.0))
+            return gt_(y, 0.0) ? kInf : 0.0;
+        const double r = gt_(y, 0.0) ? kInf : 0.0;
         return y_is_odd ? sf64_neg(r) : r;
     }
     if (isinf_(y)) {
-        if (sf64_fabs(x) == 1.0)
+        if (eq_(sf64_fabs(x), 1.0))
             return 1.0;
-        return (sf64_fabs(x) < 1.0) == (y < 0.0) ? kInf : 0.0;
+        return (lt_(sf64_fabs(x), 1.0)) == (lt_(y, 0.0)) ? kInf : 0.0;
     }
 
     // DD composition: x^y = exp(y * log|x|). log in DD, y*log in DD.
     DD l = sf64_internal_logk_dd(sf64_fabs(x));
     DD yl = ddmul_dd_dd_d(l, y);
     double r = sf64_internal_expk_dd(yl);
-    if (x < 0.0 && y_is_odd)
+    if (lt_(x, 0.0) && y_is_odd)
         r = sf64_neg(r);
     return r;
 }
 
 extern "C" double sf64_powr(double x, double y) {
-    if (x < 0.0)
+    if (lt_(x, 0.0))
         return qNaN();
     return sf64_pow(x, y);
 }
@@ -473,7 +504,7 @@ extern "C" double sf64_pown(double x, int n) {
 extern "C" double sf64_cbrt(double x) {
     if (isnan_(x))
         return qNaN();
-    if (x == 0.0 || isinf_(x))
+    if (eq_(x, 0.0) || isinf_(x))
         return x;
 
     const double a = sf64_fabs(x);
@@ -531,7 +562,7 @@ extern "C" double sf64_sinh(double x) {
         return x;
     const double a = sf64_fabs(x);
 
-    if (a < 1.0) {
+    if (lt_(a, 1.0)) {
         const double x2 = sf64_mul(x, x);
         constexpr double kC[] = {
             1.0 / 355687428096000.0, 1.0 / 1307674368000.0, 1.0 / 6227020800.0, 1.0 / 39916800.0,
@@ -541,14 +572,27 @@ extern "C" double sf64_sinh(double x) {
         return sf64_fma(sf64_mul(x, x2), p, x);
     }
 
-    if (a < 18.0) {
+    if (lt_(a, 18.0)) {
         const double e = sf64_internal_exp_core(x);
         const double en = sf64_internal_exp_core(sf64_neg(x));
         return sf64_mul(sf64_sub(e, en), 0.5);
     }
 
-    if (a > 709.78)
+    // sinh overflow boundary is log(2·DBL_MAX) ≈ 710.4758600739439, not
+    // log(DBL_MAX) ≈ 709.7827 (the exp overflow threshold). In the window
+    // (709.78, 710.4758] exp(a) overflows but sinh(a) ≈ exp(a)/2 still fits.
+    // Compute exp(a - ln2) via expk_dd on the DD pair (a - kL2U, -kL2L) so
+    // the ln2 subtraction keeps its low bits: a plain double `a - ln2` loses
+    // ≈ ulp(a) ≈ 1e-13, and exp's derivative near 710 is 1.6e308, which
+    // amplifies that loss into ≈ 450 ULP of error at the result.
+    if (gt_(a, 710.4758600739439))
         return signbit_(x) ? sf64_neg(kInf) : kInf;
+    if (gt_(a, 709.78)) {
+        DD r = ddadd2_dd_d_d(a, sf64_neg(kL2U));
+        r = ddadd2_dd_dd_d(r, sf64_neg(kL2L));
+        const double big = sf64_internal_expk_dd(r);
+        return signbit_(x) ? sf64_neg(big) : big;
+    }
     // Large |x|: e^-|x| is ≪ 2^-52 of e^|x|, so sinh ≈ ±e^|x|/2. Always
     // evaluate exp on the positive magnitude and restore sign at the end —
     // evaluating on a negative x gives e^-|x| (tiny), which is the wrong
@@ -564,7 +608,7 @@ extern "C" double sf64_cosh(double x) {
         return kInf;
     const double a = sf64_fabs(x);
 
-    if (a < 0.25) {
+    if (lt_(a, 0.25)) {
         const double x2 = sf64_mul(x, x);
         constexpr double kC[] = {
             1.0 / 87178291200.0, 1.0 / 479001600.0, 1.0 / 3628800.0, 1.0 / 40320.0,
@@ -574,7 +618,7 @@ extern "C" double sf64_cosh(double x) {
         return sf64_fma(x2, p, 1.0);
     }
 
-    if (a > 709.78)
+    if (gt_(a, 709.78))
         return kInf;
     const double e1 = sf64_internal_exp_core(x);
     const double e2 = sf64_internal_exp_core(sf64_neg(x));
@@ -589,7 +633,7 @@ extern "C" double sf64_tanh(double x) {
 
     const double a = sf64_fabs(x);
 
-    if (a < 0.5) {
+    if (lt_(a, 0.5)) {
         const double x2 = sf64_mul(x, x);
         constexpr double kSH[] = {
             1.0 / 6227020800.0, 1.0 / 39916800.0, 1.0 / 362880.0,
@@ -605,7 +649,7 @@ extern "C" double sf64_tanh(double x) {
         const double ch = sf64_fma(x2, pc, 1.0);
         return sf64_div(sh, ch);
     }
-    if (a > 20.0)
+    if (gt_(a, 20.0))
         return signbit_(x) ? -1.0 : 1.0;
 
     const double e = sf64_internal_exp_core(sf64_mul(x, 2.0));
@@ -623,7 +667,7 @@ extern "C" double sf64_asinh(double x) {
         return x;
     const double a = sf64_fabs(x);
 
-    if (a <= 1.0) {
+    if (le_(a, 1.0)) {
         DD x2 = ddmul_dd_d_d(x, x);
         DD x2p1 = ddadd2_dd_dd_d(x2, 1.0);
         const double sroot = sf64_sqrt(sf64_add(x2p1.hi, x2p1.lo));
@@ -644,15 +688,15 @@ extern "C" double sf64_asinh(double x) {
 extern "C" double sf64_acosh(double x) {
     if (isnan_(x))
         return qNaN();
-    if (x < 1.0)
+    if (lt_(x, 1.0))
         return qNaN();
     if (isinf_(x))
         return kInf;
-    if (x == 1.0)
+    if (eq_(x, 1.0))
         return 0.0;
 
     // Near x==1, use the factored form to avoid (x²-1) cancellation.
-    if (x < 2.0) {
+    if (lt_(x, 2.0)) {
         const double xm1 = sf64_sub(x, 1.0);
         const double xp1 = sf64_add(x, 1.0);
         const double s = sf64_sqrt(sf64_mul(xm1, xp1));
@@ -670,12 +714,12 @@ extern "C" double sf64_atanh(double x) {
     if (isnan_(x))
         return qNaN();
     const double a = sf64_fabs(x);
-    if (a > 1.0)
+    if (gt_(a, 1.0))
         return qNaN();
-    if (a == 1.0)
+    if (eq_(a, 1.0))
         return signbit_(x) ? sf64_neg(kInf) : kInf;
 
-    if (a < 0.5) {
+    if (lt_(a, 0.5)) {
         const double t = sf64_div(sf64_mul(x, 2.0), sf64_sub(1.0, x));
         return sf64_mul(sf64_log1p(t), 0.5);
     }

@@ -155,16 +155,20 @@ Tiers: `BIT_EXACT` (0 ULP), `U10 = 4 ULP`, `U35 = 8 ULP`, `GAMMA = 1024 ULP`.
 - x-wide: `x ∈ [1e-100, 1e100]`, `y ∈ [-5, 5]`
 - y-wide: `x ∈ [1e-6, 1e3]`, `y ∈ [-100, 100]`
 
-Outside the bounded region — specifically the near-unit-base ×
-huge-exponent corner `x ∈ [0.5, 2], |y| ≥ 200` — the log-DD tail
-precision caps at ~2⁻⁵⁶ and `pow` drifts to ~40 ULP.
+Across the full double range, 1.1's `logk_dd` DD-Horner rewrite brings
+measured worst-case `sf64_pow` inside U10 (≤4 ULP); the shipped U35
+tier remains the gated ceiling.
 
 ### Report-only (NOT CI-gated)
 
-- **`sf64_lgamma` on `(0.5, 3)`** — zero-crossings at `x = 1` and `x = 2`
-  blow up the ULP ratio against a near-zero value even though absolute
-  error stays at the IEEE-double floor (~5e-17). Tracked in
-  `tests/experimental/experimental_precision.cpp` as a report-only sweep.
+- **`sf64_lgamma` on `(0.5, 3)`** — `lgamma(x)` vanishes at `x = 1`
+  and `x = 2`. Near those zeros the result is O(1e-5) but the absolute
+  error floor of any log-of-Γ path is O(ulp(1)) ≈ 2.2e-16, so the ULP
+  ratio inherently blows past GAMMA=1024 even with a perfectly
+  computed log ingredient. The proper fix is a zero-centered Taylor
+  expansion around `x=1` and `x=2` — tracked in `TODO.md`, not
+  closed by the v1.1 `logk_dd` work. Sweep lives in
+  `tests/experimental/experimental_precision.cpp` as report-only.
 
 "Bit-exact" means every output matches the host FPU's round-to-nearest-even
 result in every bit, for every tested input — including every signed-zero,
@@ -242,11 +246,69 @@ The oracle stack runs at four depths, each stricter than the last:
 4. **libFuzzer + exhaustive round-trip** — nightly CI fuzzes each op and
    exhaustively round-trips every `float ↔ double` value. See `fuzz/`.
 
+## Rounding modes
+
+The default `sf64_*` entry points round to nearest, ties-to-even (RNE).
+Every round-affected op also has a `_r`-suffixed variant that takes an
+explicit mode from `include/soft_fp64/rounding_mode.h` (matching
+IEEE-754 §4.3):
+
+```c
+#include "soft_fp64/soft_f64.h"
+
+double a = sf64_add_r(SF64_RTZ, 1.0, std::ldexp(1.0, -53));  // round toward zero
+int32_t i = sf64_to_i32_r(SF64_RUP, 1.5);                    // 2
+double r = sf64_rint_r(SF64_RDN, -0.5);                       // -1.0
+```
+
+Mode enum values: `SF64_RNE`, `SF64_RTZ`, `SF64_RUP`, `SF64_RDN`,
+`SF64_RNA`. Every `_r` entry is bit-exact against MPFR 200-bit and
+Berkeley TestFloat 3e in every mode. Ops whose result does not depend
+on the rounding attribute (`neg`, `fabs`, `copysign`, compares,
+`ldexp`, `frexp`, classify, `fmod`, `remainder`) have no `_r` form
+by design.
+
+## IEEE exception flags
+
+Thread-local sticky flags for `INVALID`, `DIVBYZERO`, `OVERFLOW`,
+`UNDERFLOW`, and `INEXACT`, exposed via:
+
+```c
+sf64_fe_clear(0x1Fu);                    // clear all flags
+double r = sf64_div(1.0, 0.0);            // raises DIVBYZERO
+unsigned f = sf64_fe_getall();            // f & SF64_FE_DIVBYZERO != 0
+if (sf64_fe_test(SF64_FE_INVALID)) { …}
+
+sf64_fe_state_t saved;
+sf64_fe_save(&saved);                     // snapshot
+// … scratch work that may raise flags …
+sf64_fe_restore(&saved);                  // roll back
+```
+
+Flag storage is per-thread (`thread_local`); bit positions match
+`<fenv.h>` conventions so consumers can bridge to glibc fenv without a
+lookup table. Build option `SOFT_FP64_FENV`:
+
+- `tls` (default on hosted builds) — thread-local accumulator.
+- `disabled` — every raise-site compiles out and every `sf64_fe_*` entry
+  becomes a no-op; zero runtime cost on the hot path.
+- `explicit` — reserved for a caller-provided state ABI; currently
+  compiles as `disabled`.
+
+```bash
+cmake -S . -B build -DSOFT_FP64_FENV=disabled     # no flag overhead
+cmake -S . -B build                                # default: tls
+```
+
+Full-corpus flag parity is gated by `tests/testfloat/run_testfloat.cpp`
+against Berkeley SoftFloat's `fl2` column (7.16M vectors,
+`-tininessbefore`, `-exact`). sNaN-input rows are skipped pending
+payload preservation in 1.2.
+
 ## Non-goals
 
-- No non-RNE rounding modes (toward-zero, upward, downward).
-- No IEEE exception flags or thread-local fenv state.
-- No sNaN payload preservation (sNaN inputs are quieted on entry).
+- No sNaN payload preservation (sNaN inputs are quieted on entry;
+  `INVALID` is still raised when fenv is enabled).
 - No complex-number math.
 - No fp128 / fp16 sibling in this library.
 

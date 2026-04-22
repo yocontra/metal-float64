@@ -18,7 +18,14 @@
 //   f32   → f64              "<a8>  <z16> <fl2>"
 //   f64   → f32              "<a16> <z8>  <fl2>"
 //
-// Exception flags (`fl2`) are ignored — sf64_* has no flag channel.
+// Exception flags (`fl2`) are parsed from each vector and compared against
+// `sf64_fe_getall()` after the op. The runner clears flags between vectors
+// so each comparison is local. Underflow convention is aligned by passing
+// `-tininessbefore` to testfloat_gen (soft-fp64 detects tininess before
+// rounding — the MIPS / RISC-V / RV64G / POWER default). Vectors where any
+// input is a signaling NaN have their flag check skipped: `sf64_*` currently
+// quiets sNaN inputs silently; sNaN→INVALID wiring is deferred to 1.2
+// alongside `SOFT_FP64_SNAN_PROPAGATE` (see TODO.md).
 //
 // Any quiet-NaN result counts as "equal" to any expected quiet-NaN
 // (matches the existing test_arithmetic_exact.cpp convention). Non-NaN
@@ -41,6 +48,18 @@
 
 #ifndef SF64_TESTFLOAT_GEN_PATH
 #error "SF64_TESTFLOAT_GEN_PATH must be defined by CMake"
+#endif
+
+// Under `disabled` fenv mode every sf64_fe_* is a no-op; fl2 comparison is
+// inapplicable. The CMake build pipes the mode selection here; default to
+// TLS-active so local one-off builds still exercise flag checks.
+#ifndef SF64_TEST_FENV_MODE
+#define SF64_TEST_FENV_MODE 1
+#endif
+#if SF64_TEST_FENV_MODE == 1
+static constexpr bool kFlagsActive = true;
+#else
+static constexpr bool kFlagsActive = false;
 #endif
 
 // ---- bit-cast helpers --------------------------------------------------
@@ -76,6 +95,39 @@ static inline bool nan_equiv_f32(float got, float expect) {
     if (std::isnan(got) && std::isnan(expect))
         return true;
     return bits_f32(got) == bits_f32(expect);
+}
+
+// ---- fl2 helpers -------------------------------------------------------
+
+// sNaN detection (IEEE 754-2008 convention: qNaN quiet-bit set, sNaN clear).
+static inline bool is_snan_f64_bits(uint64_t b) {
+    const uint64_t exp = (b >> 52) & 0x7ffULL;
+    const uint64_t mant = b & 0x000fffffffffffffULL;
+    return exp == 0x7ffULL && mant != 0 && (mant & (1ULL << 51)) == 0;
+}
+static inline bool is_snan_f32_bits(uint32_t b) {
+    const uint32_t exp = (b >> 23) & 0xffu;
+    const uint32_t mant = b & 0x7fffffu;
+    return exp == 0xffu && mant != 0 && (mant & (1u << 22)) == 0;
+}
+
+// Berkeley softfloat fl2 bit layout (softfloat.h:85):
+//   inexact=1, underflow=2, overflow=4, infinite(divbyzero)=8, invalid=16.
+// sf64 layout (soft_f64.h): invalid=1, divbyzero=2, overflow=4, underflow=8,
+// inexact=16 — bit-compatible with <fenv.h>. Map between the two.
+static inline unsigned sf_flags_from_softfloat(uint64_t fl2) {
+    unsigned out = 0u;
+    if (fl2 & 0x01u)
+        out |= SF64_FE_INEXACT;
+    if (fl2 & 0x02u)
+        out |= SF64_FE_UNDERFLOW;
+    if (fl2 & 0x04u)
+        out |= SF64_FE_OVERFLOW;
+    if (fl2 & 0x08u)
+        out |= SF64_FE_DIVBYZERO;
+    if (fl2 & 0x10u)
+        out |= SF64_FE_INVALID;
+    return out;
 }
 
 // ---- process/stream launch --------------------------------------------
@@ -166,12 +218,27 @@ static uint64_t run_f64_binop(const char* op, f64_binop fn, const std::vector<co
         double a = from_bits(v[0]);
         double b = from_bits(v[1]);
         double z = from_bits(v[2]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[3]);
+        sf64_fe_clear(0x1Fu);
         double got = fn(a, b);
         if (!nan_equiv(got, z)) {
             char detail[128];
             std::snprintf(detail, sizeof(detail), "got=0x%016" PRIx64 " expect=0x%016" PRIx64,
                           bits(got), v[2]);
             fail(op, n, line, detail);
+        }
+        // Skip flag check if sNaN appears in inputs (sf64 doesn't raise
+        // INVALID on sNaN — deferred to 1.2).
+        const bool has_snan_input = is_snan_f64_bits(v[0]) || is_snan_f64_bits(v[1]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[160];
+                std::snprintf(detail, sizeof(detail),
+                              "flags got=0x%02x expected=0x%02x result=0x%016" PRIx64, got_flags,
+                              expected_flags, bits(got));
+                fail(op, n, line, detail);
+            }
         }
         ++n;
     }
@@ -192,12 +259,25 @@ static uint64_t run_f64_unop(const char* op, double (*fn)(double),
             fail(op, n, line, "parse");
         double a = from_bits(v[0]);
         double z = from_bits(v[1]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[2]);
+        sf64_fe_clear(0x1Fu);
         double got = fn(a);
         if (!nan_equiv(got, z)) {
             char detail[128];
             std::snprintf(detail, sizeof(detail), "got=0x%016" PRIx64 " expect=0x%016" PRIx64,
                           bits(got), v[1]);
             fail(op, n, line, detail);
+        }
+        const bool has_snan_input = is_snan_f64_bits(v[0]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[160];
+                std::snprintf(detail, sizeof(detail),
+                              "flags got=0x%02x expected=0x%02x result=0x%016" PRIx64, got_flags,
+                              expected_flags, bits(got));
+                fail(op, n, line, detail);
+            }
         }
         ++n;
     }
@@ -210,7 +290,7 @@ static uint64_t run_f64_mulAdd(uint64_t n_cases) {
     char ncount[32];
     std::snprintf(ncount, sizeof(ncount), "%" PRIu64, n_cases);
     Proc p;
-    if (!p.open(mk_cmd(op, {"-n", ncount})))
+    if (!p.open(mk_cmd(op, {"-n", ncount, "-tininessbefore"})))
         std::abort();
     char line[256];
     uint64_t n = 0;
@@ -222,12 +302,26 @@ static uint64_t run_f64_mulAdd(uint64_t n_cases) {
         double b = from_bits(v[1]);
         double c = from_bits(v[2]);
         double z = from_bits(v[3]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[4]);
+        sf64_fe_clear(0x1Fu);
         double got = sf64_fma(a, b, c);
         if (!nan_equiv(got, z)) {
             char detail[128];
             std::snprintf(detail, sizeof(detail), "got=0x%016" PRIx64 " expect=0x%016" PRIx64,
                           bits(got), v[3]);
             fail(op, n, line, detail);
+        }
+        const bool has_snan_input =
+            is_snan_f64_bits(v[0]) || is_snan_f64_bits(v[1]) || is_snan_f64_bits(v[2]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[160];
+                std::snprintf(detail, sizeof(detail),
+                              "flags got=0x%02x expected=0x%02x result=0x%016" PRIx64, got_flags,
+                              expected_flags, bits(got));
+                fail(op, n, line, detail);
+            }
         }
         ++n;
     }
@@ -426,17 +520,28 @@ template <typename IntT> static uint64_t run_int_to_f64(const char* op, double (
     char line[256];
     uint64_t n = 0;
     while (std::fgets(line, sizeof(line), p.fp)) {
-        uint64_t v[2];
-        if (!parse_hex_n(line, 2, v))
+        uint64_t v[3];
+        if (!parse_hex_n(line, 3, v))
             fail(op, n, line, "parse");
         IntT a = (IntT)v[0];
         double z = from_bits(v[1]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[2]);
+        sf64_fe_clear(0x1Fu);
         double got = fn(a);
         if (!nan_equiv(got, z)) {
             char detail[128];
             std::snprintf(detail, sizeof(detail), "got=0x%016" PRIx64 " expect=0x%016" PRIx64,
                           bits(got), v[1]);
             fail(op, n, line, detail);
+        }
+        if (kFlagsActive) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[160];
+                std::snprintf(detail, sizeof(detail), "flags got=0x%02x expected=0x%02x", got_flags,
+                              expected_flags);
+                fail(op, n, line, detail);
+            }
         }
         ++n;
     }
@@ -461,15 +566,19 @@ template <typename IntT> static uint64_t run_int_to_f64(const char* op, double (
 // rounding logic, which is the whole point of the oracle).
 template <typename IntT, IntT (*Fn)(double)>
 static uint64_t run_f64_to_int(const char* op, double tmin, double tmax_plus_one) {
+    // `-exact` makes Berkeley raise INEXACT on lossy int conversions (IEEE
+    // §5.4.1 default). Without it, softfloat's `-notexact` default silences
+    // INEXACT on all integer rounding, which doesn't match sf64's IEEE-
+    // conformant behavior.
     Proc p;
-    if (!p.open(mk_cmd(op, {"-rminMag"})))
+    if (!p.open(mk_cmd(op, {"-rminMag", "-exact"})))
         std::abort();
     char line[256];
     uint64_t n = 0;
     uint64_t skipped_oor = 0;
     while (std::fgets(line, sizeof(line), p.fp)) {
-        uint64_t v[2];
-        if (!parse_hex_n(line, 2, v))
+        uint64_t v[3];
+        if (!parse_hex_n(line, 3, v))
             fail(op, n, line, "parse");
         double a = from_bits(v[0]);
         const bool in_range = !std::isnan(a) && std::isfinite(a) && a >= tmin && a < tmax_plus_one;
@@ -479,6 +588,8 @@ static uint64_t run_f64_to_int(const char* op, double tmin, double tmax_plus_one
             continue;
         }
         IntT z = (IntT)v[1];
+        const unsigned expected_flags = sf_flags_from_softfloat(v[2]);
+        sf64_fe_clear(0x1Fu);
         IntT got = Fn(a);
         if (got != z) {
             char detail[160];
@@ -486,6 +597,16 @@ static uint64_t run_f64_to_int(const char* op, double tmin, double tmax_plus_one
                           "a=0x%016" PRIx64 " got=0x%016" PRIx64 " expect=0x%016" PRIx64, v[0],
                           (uint64_t)(uint64_t)got, (uint64_t)(uint64_t)z);
             fail(op, n, line, detail);
+        }
+        if (kFlagsActive) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[160];
+                std::snprintf(detail, sizeof(detail),
+                              "a=0x%016" PRIx64 " flags got=0x%02x expected=0x%02x", v[0],
+                              got_flags, expected_flags);
+                fail(op, n, line, detail);
+            }
         }
         ++n;
     }
@@ -521,7 +642,20 @@ static uint64_t run_narrow_int_to_f64(const char* label, const char* gen_op, Wid
             continue;
         }
         NarrowT narrow = (NarrowT)wide;
+        if (kFlagsActive) {
+            sf64_fe_clear(0x1Fu);
+        }
         double got = Fn(narrow);
+        // Narrow int → f64 is exact by construction: every i8/i16/u8/u16
+        // value fits inside the 53-bit f64 significand with zero rounding
+        // loss, so no exception flag may be raised.
+        if (kFlagsActive && sf64_fe_getall() != 0u) {
+            char detail[192];
+            std::snprintf(detail, sizeof(detail),
+                          "narrow=0x%llx got=0x%016" PRIx64 " spurious fl=0x%02x",
+                          (long long)(int64_t)wide, bits(got), sf64_fe_getall());
+            fail(label, n, line, detail);
+        }
         // Oracle 1: TestFloat's i32/u32→f64 result (always exact for narrow
         // range since |narrow| < 2^31, so no rounding).
         double oracle = from_bits(v[1]);
@@ -567,12 +701,34 @@ static uint64_t run_f64_to_narrow_int(const char* label, const char* gen_op, dou
             ++skipped;
             continue;
         }
+        if (kFlagsActive) {
+            sf64_fe_clear(0x1Fu);
+        }
         NarrowT got = Fn(a);
+        const unsigned got_flags = kFlagsActive ? sf64_fe_getall() : 0u;
+        // IEEE §7.1: integer conversion raises INEXACT iff round-trip
+        // through double loses bits. In-range here means no OVERFLOW /
+        // UNDERFLOW, and the NaN/Inf gate above means no INVALID. Only
+        // INEXACT can fire, and only when `(double)got != a`.
+        if (kFlagsActive) {
+            const bool lossy = (static_cast<double>(got) != a);
+            const unsigned expected = lossy ? SF64_FE_INEXACT : 0u;
+            if (got_flags != expected) {
+                char detail[192];
+                std::snprintf(detail, sizeof(detail),
+                              "a=0x%016" PRIx64 " got=0x%llx got_fl=0x%02x expected_fl=0x%02x",
+                              v[0], (long long)(int64_t)got, got_flags, expected);
+                fail(label, n, line, detail);
+            }
+        }
         // TestFloat oracle: use the wide sf64_to_i32/u32 path applied to
         // the same input, then truncate. WideFn is used rather than the
         // stored v[1] because TestFloat emits sentinels for OOR, and the
         // narrow path is the sf64_* canonical truncation by definition
         // (not the Berkeley SSE sentinel).
+        if (kFlagsActive) {
+            sf64_fe_clear(0x1Fu); // don't let WideFn's flags leak into next iter
+        }
         WideT wide = WideFn(a);
         NarrowT tf_oracle = static_cast<NarrowT>(wide);
         NarrowT cast_oracle = static_cast<NarrowT>(a);
@@ -599,17 +755,32 @@ static uint64_t run_f32_to_f64() {
     char line[256];
     uint64_t n = 0;
     while (std::fgets(line, sizeof(line), p.fp)) {
-        uint64_t v[2];
-        if (!parse_hex_n(line, 2, v))
+        uint64_t v[3];
+        if (!parse_hex_n(line, 3, v))
             fail(op, n, line, "parse");
         float a = f32_from_bits((uint32_t)v[0]);
         double z = from_bits(v[1]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[2]);
+        sf64_fe_clear(0x1Fu);
         double got = sf64_from_f32(a);
         if (!nan_equiv(got, z)) {
             char detail[128];
             std::snprintf(detail, sizeof(detail), "got=0x%016" PRIx64 " expect=0x%016" PRIx64,
                           bits(got), v[1]);
             fail(op, n, line, detail);
+        }
+        // f32→f64 is always exact (mantissa fits, exp widens), so the only
+        // flag Berkeley ever raises is INVALID on sNaN input. sf64 silently
+        // quiets sNaN, so skip those vectors.
+        const bool has_snan_input = is_snan_f32_bits((uint32_t)v[0]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[160];
+                std::snprintf(detail, sizeof(detail), "a=0x%08x flags got=0x%02x expected=0x%02x",
+                              (uint32_t)v[0], got_flags, expected_flags);
+                fail(op, n, line, detail);
+            }
         }
         ++n;
     }
@@ -622,18 +793,22 @@ static uint64_t run_f32_to_f64() {
 static uint64_t run_f64_to_f32() {
     const char* op = "f64_to_f32";
     Proc p;
-    if (!p.open(mk_cmd(op, {"-rnear_even"})))
+    if (!p.open(mk_cmd(op, {"-rnear_even", "-tininessbefore"})))
         std::abort();
     char line[256];
     uint64_t n = 0;
     uint64_t mismatches = 0;
+    uint64_t flag_mismatches = 0;
     char first_detail[256] = {0};
+    char first_flag_detail[256] = {0};
     while (std::fgets(line, sizeof(line), p.fp)) {
-        uint64_t v[2];
-        if (!parse_hex_n(line, 2, v))
+        uint64_t v[3];
+        if (!parse_hex_n(line, 3, v))
             fail(op, n, line, "parse");
         double a = from_bits(v[0]);
         float z = f32_from_bits((uint32_t)v[1]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[2]);
+        sf64_fe_clear(0x1Fu);
         float got = sf64_to_f32(a);
         if (!nan_equiv_f32(got, z)) {
             if (mismatches < 5) {
@@ -649,11 +824,29 @@ static uint64_t run_f64_to_f32() {
             }
             ++mismatches;
         }
+        const bool has_snan_input = is_snan_f64_bits(v[0]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                if (flag_mismatches == 0) {
+                    std::snprintf(first_flag_detail, sizeof(first_flag_detail),
+                                  "line=%" PRIu64 " a=0x%016" PRIx64
+                                  " flags got=0x%02x expected=0x%02x",
+                                  n, v[0], got_flags, expected_flags);
+                }
+                ++flag_mismatches;
+            }
+        }
         ++n;
     }
     if (mismatches) {
         std::fprintf(stderr, "FAIL[%s] %" PRIu64 " / %" PRIu64 " mismatches; first: %s\n", op,
                      mismatches, n, first_detail);
+        std::abort();
+    }
+    if (flag_mismatches) {
+        std::fprintf(stderr, "FAIL[%s] %" PRIu64 " / %" PRIu64 " flag mismatches; first: %s\n", op,
+                     flag_mismatches, n, first_flag_detail);
         std::abort();
     }
     return n;
@@ -672,14 +865,19 @@ int main() {
     std::printf("gen: %s\n", SF64_TESTFLOAT_GEN_PATH);
 
     // ---- arithmetic (default -level 1) ----------------------------------
-    run("f64_add", run_f64_binop("f64_add", sf64_add, {}));
-    run("f64_sub", run_f64_binop("f64_sub", sf64_sub, {}));
-    run("f64_mul", run_f64_binop("f64_mul", sf64_mul, {}));
-    run("f64_div", run_f64_binop("f64_div", sf64_div, {}));
+    //
+    // `-tininessbefore` aligns Berkeley's underflow-detection convention with
+    // soft-fp64's (tiny-before-rounding — the MIPS/RISC-V/RV64G/POWER default).
+    // Without this flag Berkeley detects tininess after rounding and emits a
+    // different UNDERFLOW flag pattern for vectors rounding up from subnormal.
+    run("f64_add", run_f64_binop("f64_add", sf64_add, {"-tininessbefore"}));
+    run("f64_sub", run_f64_binop("f64_sub", sf64_sub, {"-tininessbefore"}));
+    run("f64_mul", run_f64_binop("f64_mul", sf64_mul, {"-tininessbefore"}));
+    run("f64_div", run_f64_binop("f64_div", sf64_div, {"-tininessbefore"}));
     // IEEE-754 `remainder` (round-to-nearest-even quotient) — lands via
     // sf64_remainder (fmod + tie-break).
-    run("f64_rem", run_f64_binop("f64_rem", sf64_remainder, {}));
-    run("f64_sqrt", run_f64_unop("f64_sqrt", sf64_sqrt, {}));
+    run("f64_rem", run_f64_binop("f64_rem", sf64_remainder, {"-tininessbefore"}));
+    run("f64_sqrt", run_f64_unop("f64_sqrt", sf64_sqrt, {"-tininessbefore"}));
 
     // mulAdd has a hardcoded minimum of 6,133,248 vectors at level 1. The
     // runtime is ~15-30s depending on machine. Pass -n explicitly so we

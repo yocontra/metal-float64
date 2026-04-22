@@ -56,14 +56,14 @@ SF64_ALWAYS_INLINE double qNaN() noexcept {
 // ---- integer predicates (no host FPU arithmetic in the body) ------------
 
 SF64_ALWAYS_INLINE bool is_int(double x) noexcept {
-    return sf64_sub(x, sf64_trunc(x)) == 0.0;
+    return soft_fp64::sleef::eq_(sf64_sub(x, sf64_trunc(x)), 0.0);
 }
 
 SF64_ALWAYS_INLINE bool is_odd_int(double x) noexcept {
     if (!is_int(x))
         return false;
     const double half = sf64_mul(x, 0.5);
-    return sf64_sub(half, sf64_trunc(half)) != 0.0;
+    return soft_fp64::sleef::ne_(sf64_sub(half, sf64_trunc(half)), 0.0);
 }
 
 } // namespace soft_fp64::sleef::detail

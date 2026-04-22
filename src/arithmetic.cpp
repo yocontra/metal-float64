@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "internal.h"
+#include "internal_fenv.h"
 #include "soft_fp64/soft_f64.h"
 
 #include <cstdint>
@@ -41,33 +42,53 @@ namespace {
 // Subnormals are normalised to the same canonical layout by left-shifting
 // until the implicit bit re-appears, decrementing the working exponent.
 
-// Round-to-nearest-even and pack. `exp` is the biased target exponent
-// corresponding to the implicit bit sitting at bit 61 of `sig`.
-double round_and_pack(uint32_t sign, int32_t exp, uint64_t sig) noexcept {
-    // Overflow fast-exit: biased exp that would push the implicit bit past
-    // the max representable range becomes signed inf.
+// Mode-aware round-and-pack. `exp` is the biased target exponent corresponding
+// to the implicit bit sitting at bit 61 of `sig`; `mode` selects the rounding
+// attribute (SF64_RNE reproduces the original pre-1.1 behaviour bit-exactly).
+SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, int32_t exp, uint64_t sig,
+                                         sf64_rounding_mode mode) noexcept {
+    auto overflow_result = [](uint32_t s, sf64_rounding_mode m) -> double {
+        // Directed modes: RTZ always returns max-finite; RUP returns +inf
+        // for positive / max-finite for negative; RDN is the mirror.
+        // RNE / RNA always return signed infinity.
+        switch (m) {
+        case SF64_RTZ:
+            return from_bits(pack(s, 0x7FEu, kFracMask));
+        case SF64_RUP:
+            return s == 0u ? from_bits(pack(0u, 0x7FFu, 0))
+                           : from_bits(pack(1u, 0x7FEu, kFracMask));
+        case SF64_RDN:
+            return s != 0u ? from_bits(pack(1u, 0x7FFu, 0))
+                           : from_bits(pack(0u, 0x7FEu, kFracMask));
+        case SF64_RNE:
+        case SF64_RNA:
+        default:
+            return from_bits(pack(s, 0x7FFu, 0));
+        }
+    };
+
     if (exp >= 0x7FF) {
-        return from_bits(pack(sign, 0x7FFu, 0));
+        SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+        return overflow_result(sign, mode);
     }
 
-    if (exp <= 0) {
+    const bool was_tiny_before_rounding = (exp <= 0);
+    if (was_tiny_before_rounding) {
         // Subnormal / below-subnormal: right-shift-with-jamming to align.
         const int shift = 1 - exp;
         sig = shift_right_jamming(sig, shift);
         exp = 0;
     }
 
-    // Round-to-nearest-even.
-    //   round_bit = bit 8
-    //   sticky = bits 7..0
-    //   mantissa LSB = bit 9
-    const uint64_t round_bit = (sig >> 8) & 1ULL;
-    const uint64_t sticky = sig & 0xFFULL;
-    const uint64_t lsb = (sig >> 9) & 1ULL;
+    // Round decision: bit 8 is the guard bit, bits 7..0 are sticky, bit 9 is
+    // the target LSB (used for RNE's tiebreak-to-even).
+    const bool round_bit = ((sig >> 8) & 1ULL) != 0;
+    const bool sticky = (sig & 0xFFULL) != 0;
+    const bool lsb = ((sig >> 9) & 1ULL) != 0;
+    const bool inexact = round_bit || sticky;
 
     uint64_t rounded = sig;
-    if (round_bit != 0 && (sticky != 0 || lsb != 0)) {
-        // Increment by 1 ulp at bit 9.
+    if (sf64_internal_should_round_up(sign, round_bit, sticky, lsb, mode)) {
         rounded += (1ULL << 9);
     }
 
@@ -78,7 +99,8 @@ double round_and_pack(uint32_t sign, int32_t exp, uint64_t sig) noexcept {
         rounded = shift_right_jamming(rounded, 1);
         ++exp;
         if (exp >= 0x7FF) {
-            return from_bits(pack(sign, 0x7FFu, 0));
+            SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+            return overflow_result(sign, mode);
         }
     }
 
@@ -104,6 +126,18 @@ double round_and_pack(uint32_t sign, int32_t exp, uint64_t sig) noexcept {
         }
     }
 
+    // IEEE 754 §7.5: underflow = tiny-before-rounding AND inexact (the
+    // "before rounding" convention — MIPS / RISC-V default). Tiny-before-
+    // rounding is captured by was_tiny_before_rounding; the inexact signal
+    // still comes from the guard/sticky of the rounded tail.
+    if (inexact) {
+        if (was_tiny_before_rounding) {
+            SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+        } else {
+            SF64_FE_RAISE(SF64_FE_INEXACT);
+        }
+    }
+
     return from_bits(pack(sign, final_exp, mantissa));
 }
 
@@ -119,7 +153,7 @@ struct NormalisedSubnormal {
     int32_t shift; // count of positions shifted left (>= 1)
 };
 
-NormalisedSubnormal normalise_subnormal(uint64_t frac) noexcept {
+SF64_ALWAYS_INLINE NormalisedSubnormal normalise_subnormal(uint64_t frac) noexcept {
     // SAFETY: caller ensures frac != 0.
     const int lz = __builtin_clzll(frac);
     // We want bit 52 to be the MSB, i.e. bit index 52. Currently MSB is at
@@ -146,7 +180,7 @@ struct Unpacked {
     uint64_t sig; // significand shifted left by 9 (implicit bit at bit 62)
 };
 
-Unpacked unpack_finite_nonzero(uint64_t bits) noexcept {
+SF64_ALWAYS_INLINE Unpacked unpack_finite_nonzero(uint64_t bits) noexcept {
     Unpacked u;
     u.sign = extract_sign(bits);
     const uint32_t raw_exp = extract_exp(bits);
@@ -166,7 +200,8 @@ Unpacked unpack_finite_nonzero(uint64_t bits) noexcept {
 }
 
 // Add two significands that share the same sign.
-double add_magnitudes(uint32_t sign, uint64_t a_bits, uint64_t b_bits) noexcept {
+SF64_ALWAYS_INLINE double add_magnitudes(uint32_t sign, uint64_t a_bits, uint64_t b_bits,
+                                         sf64_rounding_mode mode) noexcept {
     const Unpacked a = unpack_finite_nonzero(a_bits);
     const Unpacked b = unpack_finite_nonzero(b_bits);
 
@@ -196,16 +231,16 @@ double add_magnitudes(uint32_t sign, uint64_t a_bits, uint64_t b_bits) noexcept 
         ++exp;
     }
 
-    return round_and_pack(sign, exp, sum);
+    return round_and_pack(sign, exp, sum, mode);
 }
 
 // Subtract magnitudes. `a_bits` and `b_bits` are finite, non-zero. The sign
 // follows the operand with the larger magnitude; if magnitudes are exactly
-// equal, the result is +0 under round-to-nearest-even (unless invoked with
-// a subtraction whose true mathematical sign is negative → -0; we pass the
-// "preferred zero sign" via `zero_sign`).
-double sub_magnitudes(uint32_t a_sign, uint64_t a_bits, uint64_t b_bits,
-                      uint32_t zero_sign) noexcept {
+// equal, the result is +0 under RNE / RTZ / RUP / RNA and -0 under RDN
+// (IEEE 754-2008 §6.3: exact cancellation produces -0 only for RDN);
+// callers pass the "preferred zero sign" for RDN via `zero_sign`.
+SF64_ALWAYS_INLINE double sub_magnitudes(uint32_t a_sign, uint64_t a_bits, uint64_t b_bits,
+                                         uint32_t zero_sign, sf64_rounding_mode mode) noexcept {
     const Unpacked a = unpack_finite_nonzero(a_bits);
     const Unpacked b = unpack_finite_nonzero(b_bits);
 
@@ -259,102 +294,12 @@ double sub_magnitudes(uint32_t a_sign, uint64_t a_bits, uint64_t b_bits,
     diff <<= norm_shift;
     exp -= norm_shift;
 
-    return round_and_pack(sign, exp, diff);
+    return round_and_pack(sign, exp, diff, mode);
 }
 
-} // unnamed namespace
-
-// ---- ABI ------------------------------------------------------------------
-
-extern "C" double sf64_neg(double a) {
-    // Sign-bit flip, preserving NaN payload. Never touch the host FPU.
-    return from_bits(bits_of(a) ^ kSignMask);
-}
-
-extern "C" double sf64_add(double a, double b) {
-    const uint64_t ab = bits_of(a);
-    const uint64_t bb = bits_of(b);
-    const uint32_t a_exp = extract_exp(ab);
-    const uint32_t b_exp = extract_exp(bb);
-    const uint32_t a_sign = extract_sign(ab);
-    const uint32_t b_sign = extract_sign(bb);
-
-    // NaN propagation.
-    if (is_nan_bits(ab) || is_nan_bits(bb)) {
-        return propagate_nan(ab, bb);
-    }
-
-    // Inf handling.
-    if (a_exp == kExpMax || b_exp == kExpMax) {
-        // At least one inf (NaN already handled).
-        const bool a_inf = (a_exp == kExpMax);
-        const bool b_inf = (b_exp == kExpMax);
-        if (a_inf && b_inf) {
-            // inf + inf = inf if signs match, else invalid → canonical NaN.
-            if (a_sign == b_sign)
-                return make_signed_inf(a_sign);
-            return canonical_nan();
-        }
-        return a_inf ? make_signed_inf(a_sign) : make_signed_inf(b_sign);
-    }
-
-    // Zero handling.
-    const bool a_zero = is_zero_bits(ab);
-    const bool b_zero = is_zero_bits(bb);
-    if (a_zero && b_zero) {
-        // +0 + +0 = +0;  -0 + -0 = -0;  +0 + -0 = +0 (round-to-nearest-even).
-        if (a_sign == b_sign)
-            return make_signed_zero(a_sign);
-        return make_signed_zero(0);
-    }
-    if (a_zero)
-        return b;
-    if (b_zero)
-        return a;
-
-    // Both finite, non-zero.
-    if (a_sign == b_sign) {
-        return add_magnitudes(a_sign, ab, bb);
-    }
-    // Differing signs → subtraction. Preferred zero sign for exact
-    // cancellation is +0 under round-to-nearest-even.
-    return sub_magnitudes(a_sign, ab, bb, /*zero_sign=*/0u);
-}
-
-extern "C" double sf64_sub(double a, double b) {
-    // a - b = a + neg(b). Implemented directly to avoid double-dispatch
-    // through the host FPU (there is none in these bodies anyway).
-    return sf64_add(a, sf64_neg(b));
-}
-
-extern "C" double sf64_mul(double a, double b) {
-    const uint64_t ab = bits_of(a);
-    const uint64_t bb = bits_of(b);
-    const uint32_t a_sign = extract_sign(ab);
-    const uint32_t b_sign = extract_sign(bb);
-    const uint32_t r_sign = a_sign ^ b_sign;
-    const uint32_t a_exp = extract_exp(ab);
-    const uint32_t b_exp = extract_exp(bb);
-
-    // NaN.
-    if (is_nan_bits(ab) || is_nan_bits(bb)) {
-        return propagate_nan(ab, bb);
-    }
-
-    // Inf.
-    if (a_exp == kExpMax || b_exp == kExpMax) {
-        // 0 * inf → NaN.
-        if (is_zero_bits(ab) || is_zero_bits(bb)) {
-            return canonical_nan();
-        }
-        return make_signed_inf(r_sign);
-    }
-
-    // Zero.
-    if (is_zero_bits(ab) || is_zero_bits(bb)) {
-        return make_signed_zero(r_sign);
-    }
-
+// Core multiplication body — finite, non-zero operands. Mode-parametrized.
+SF64_ALWAYS_INLINE double mul_impl(uint64_t ab, uint64_t bb, uint32_t r_sign,
+                                   sf64_rounding_mode mode) noexcept {
     // Unpack magnitudes. Significand sits at bit 52 with implicit bit.
     int32_t exp_a, exp_b;
     uint64_t sig_a, sig_b;
@@ -369,22 +314,11 @@ extern "C" double sf64_mul(double a, double b) {
         exp_b = ub.exp;
     }
 
-    // 53 × 53 → up to 106-bit product. MSB lies at bit 104 or 105 depending
-    // on whether the product overflowed.
-    // SAFETY: __uint128_t is a compiler intrinsic supported by Apple Clang
-    // and GCC on 64-bit targets; used only to hold the exact 106-bit
-    // product of two 53-bit operands.
+    // 53 × 53 → up to 106-bit product.
     const __uint128_t product = static_cast<__uint128_t>(sig_a) * static_cast<__uint128_t>(sig_b);
-
     int32_t exp_r = exp_a + exp_b - kExpBias;
 
-    // Shift the 128-bit product into the canonical "shifted-left-by-9"
-    // layout with implicit bit at bit 61.
-    //
-    // Case A (product MSB at bit 104): shift right by 43 → implicit at 61.
-    // Case B (product MSB at bit 105): shift right by 44, bump exp.
-    //
-    // Shifted-out low bits are jammed into sticky bit 0.
+    // Shift into canonical "<<9" layout.
     uint64_t sig;
     if ((product >> 105) & 1u) {
         const int shift = 44;
@@ -403,10 +337,121 @@ extern "C" double sf64_mul(double a, double b) {
             sig |= 1ULL;
     }
 
-    return round_and_pack(r_sign, exp_r, sig);
+    return round_and_pack(r_sign, exp_r, sig, mode);
 }
 
-extern "C" double sf64_div(double a, double b) {
+// Core division body — finite, non-zero operands. Mode-parametrized.
+SF64_ALWAYS_INLINE double div_impl(uint64_t ab, uint64_t bb, uint32_t r_sign,
+                                   sf64_rounding_mode mode) noexcept {
+    const Unpacked ua = unpack_finite_nonzero(ab);
+    const Unpacked ub = unpack_finite_nonzero(bb);
+    uint64_t sig_a = ua.sig >> 9;
+    const uint64_t sig_b = ub.sig >> 9;
+
+    int32_t exp_r = ua.exp - ub.exp + kExpBias;
+
+    if (sig_a < sig_b) {
+        sig_a <<= 1;
+        --exp_r;
+    }
+
+    const __uint128_t num = static_cast<__uint128_t>(sig_a) << 55;
+    const __uint128_t den = static_cast<__uint128_t>(sig_b);
+    const uint64_t quotient = static_cast<uint64_t>(num / den);
+    const __uint128_t remainder = num % den;
+
+    uint64_t sig = quotient << 6;
+    if (remainder != 0) {
+        sig |= 1ULL;
+    }
+
+    if ((sig >> 62) & 1ULL) {
+        sig = shift_right_jamming(sig, 1);
+        ++exp_r;
+    }
+
+    return round_and_pack(r_sign, exp_r, sig, mode);
+}
+
+} // unnamed namespace
+
+// ---- ABI ------------------------------------------------------------------
+
+extern "C" double sf64_neg(double a) {
+    // Sign-bit flip, preserving NaN payload. Never touch the host FPU.
+    return from_bits(bits_of(a) ^ kSignMask);
+}
+
+// Mode-parametrized add. Public SF64_RNE path wraps this.
+static SF64_ALWAYS_INLINE double add_r_impl(double a, double b, sf64_rounding_mode mode) noexcept {
+    const uint64_t ab = bits_of(a);
+    const uint64_t bb = bits_of(b);
+    const uint32_t a_exp = extract_exp(ab);
+    const uint32_t b_exp = extract_exp(bb);
+    const uint32_t a_sign = extract_sign(ab);
+    const uint32_t b_sign = extract_sign(bb);
+
+    // NaN propagation. (sNaN→INVALID wiring is deferred to 1.2 alongside
+    // SOFT_FP64_SNAN_PROPAGATE — the plan parks payload preservation there.)
+    if (is_nan_bits(ab) || is_nan_bits(bb)) {
+        return propagate_nan(ab, bb);
+    }
+
+    // Inf handling.
+    if (a_exp == kExpMax || b_exp == kExpMax) {
+        const bool a_inf = (a_exp == kExpMax);
+        const bool b_inf = (b_exp == kExpMax);
+        if (a_inf && b_inf) {
+            if (a_sign == b_sign)
+                return make_signed_inf(a_sign);
+            // inf + (-inf) or (-inf) + inf: invalid.
+            SF64_FE_RAISE(SF64_FE_INVALID);
+            return canonical_nan();
+        }
+        return a_inf ? make_signed_inf(a_sign) : make_signed_inf(b_sign);
+    }
+
+    // Zero handling.
+    const bool a_zero = is_zero_bits(ab);
+    const bool b_zero = is_zero_bits(bb);
+    if (a_zero && b_zero) {
+        // +0 + +0 = +0;  -0 + -0 = -0;  +0 + -0 tie under RDN → -0 per IEEE.
+        if (a_sign == b_sign)
+            return make_signed_zero(a_sign);
+        return make_signed_zero(mode == SF64_RDN ? 1u : 0u);
+    }
+    if (a_zero)
+        return b;
+    if (b_zero)
+        return a;
+
+    // Both finite, non-zero.
+    if (a_sign == b_sign) {
+        return add_magnitudes(a_sign, ab, bb, mode);
+    }
+    // Differing signs → subtraction. Preferred zero sign for exact
+    // cancellation is +0 under RNE/RTZ/RUP/RNA and -0 under RDN.
+    const uint32_t zero_sign = (mode == SF64_RDN) ? 1u : 0u;
+    return sub_magnitudes(a_sign, ab, bb, zero_sign, mode);
+}
+
+extern "C" double sf64_add(double a, double b) {
+    return add_r_impl(a, b, SF64_RNE);
+}
+
+extern "C" double sf64_add_r(sf64_rounding_mode mode, double a, double b) {
+    return add_r_impl(a, b, mode);
+}
+
+extern "C" double sf64_sub(double a, double b) {
+    return add_r_impl(a, sf64_neg(b), SF64_RNE);
+}
+
+extern "C" double sf64_sub_r(sf64_rounding_mode mode, double a, double b) {
+    return add_r_impl(a, sf64_neg(b), mode);
+}
+
+static SF64_ALWAYS_INLINE double mul_r_impl(double a, double b, sf64_rounding_mode mode) noexcept {
     const uint64_t ab = bits_of(a);
     const uint64_t bb = bits_of(b);
     const uint32_t a_sign = extract_sign(ab);
@@ -415,76 +460,80 @@ extern "C" double sf64_div(double a, double b) {
     const uint32_t a_exp = extract_exp(ab);
     const uint32_t b_exp = extract_exp(bb);
 
-    // NaN.
-    if (is_nan_bits(ab) || is_nan_bits(bb)) {
+    if (is_nan_bits(ab) || is_nan_bits(bb))
         return propagate_nan(ab, bb);
+
+    if (a_exp == kExpMax || b_exp == kExpMax) {
+        if (is_zero_bits(ab) || is_zero_bits(bb)) {
+            // 0 * inf (either ordering): invalid.
+            SF64_FE_RAISE(SF64_FE_INVALID);
+            return canonical_nan();
+        }
+        return make_signed_inf(r_sign);
     }
 
-    // Inf handling.
+    if (is_zero_bits(ab) || is_zero_bits(bb))
+        return make_signed_zero(r_sign);
+
+    return mul_impl(ab, bb, r_sign, mode);
+}
+
+extern "C" double sf64_mul(double a, double b) {
+    return mul_r_impl(a, b, SF64_RNE);
+}
+
+extern "C" double sf64_mul_r(sf64_rounding_mode mode, double a, double b) {
+    return mul_r_impl(a, b, mode);
+}
+
+static SF64_ALWAYS_INLINE double div_r_impl(double a, double b, sf64_rounding_mode mode) noexcept {
+    const uint64_t ab = bits_of(a);
+    const uint64_t bb = bits_of(b);
+    const uint32_t a_sign = extract_sign(ab);
+    const uint32_t b_sign = extract_sign(bb);
+    const uint32_t r_sign = a_sign ^ b_sign;
+    const uint32_t a_exp = extract_exp(ab);
+    const uint32_t b_exp = extract_exp(bb);
+
+    if (is_nan_bits(ab) || is_nan_bits(bb))
+        return propagate_nan(ab, bb);
+
     const bool a_inf = (a_exp == kExpMax);
     const bool b_inf = (b_exp == kExpMax);
-    if (a_inf && b_inf)
-        return canonical_nan(); // inf/inf → NaN
+    if (a_inf && b_inf) {
+        // inf / inf: invalid.
+        SF64_FE_RAISE(SF64_FE_INVALID);
+        return canonical_nan();
+    }
     if (a_inf)
-        return make_signed_inf(r_sign); // inf/finite → signed inf
+        return make_signed_inf(r_sign);
     if (b_inf)
-        return make_signed_zero(r_sign); // finite/inf → signed zero
+        return make_signed_zero(r_sign);
 
-    // Zero handling.
     const bool a_zero = is_zero_bits(ab);
     const bool b_zero = is_zero_bits(bb);
-    if (a_zero && b_zero)
-        return canonical_nan(); // 0/0 → NaN
-    if (b_zero)
-        return make_signed_inf(r_sign); // finite/0 → signed inf
+    if (a_zero && b_zero) {
+        // 0 / 0: invalid.
+        SF64_FE_RAISE(SF64_FE_INVALID);
+        return canonical_nan();
+    }
+    if (b_zero) {
+        // finite non-zero / 0: division by zero.
+        SF64_FE_RAISE(SF64_FE_DIVBYZERO);
+        return make_signed_inf(r_sign);
+    }
     if (a_zero)
-        return make_signed_zero(r_sign); // 0/finite → signed zero
+        return make_signed_zero(r_sign);
 
-    // Unpack both.
-    const Unpacked ua = unpack_finite_nonzero(ab);
-    const Unpacked ub = unpack_finite_nonzero(bb);
-    // Significands at bit 52 (with implicit bit). Strip the <<9.
-    uint64_t sig_a = ua.sig >> 9;
-    const uint64_t sig_b = ub.sig >> 9;
+    return div_impl(ab, bb, r_sign, mode);
+}
 
-    int32_t exp_r = ua.exp - ub.exp + kExpBias;
+extern "C" double sf64_div(double a, double b) {
+    return div_r_impl(a, b, SF64_RNE);
+}
 
-    // Long division: we want a 53-bit quotient (plus guard/round/sticky).
-    // If sig_a < sig_b, left-shift sig_a by 1 and decrement exp_r (this
-    // keeps the leading quotient bit as the implicit bit).
-    if (sig_a < sig_b) {
-        sig_a <<= 1;
-        --exp_r;
-    }
-
-    // Compute quotient with enough precision for round-to-nearest-even by
-    // scaling the numerator up by 2^55. With the pre-shift ensuring
-    // sig_a >= sig_b and sig_a < 2*sig_b, the quotient has its MSB at bit
-    // 55 (i.e. quotient in [2^55, 2^56)).
-    //
-    // SAFETY: 128-bit unsigned division is a compiler intrinsic supported
-    // by Apple Clang / GCC on 64-bit targets.
-    const __uint128_t num = static_cast<__uint128_t>(sig_a) << 55;
-    const __uint128_t den = static_cast<__uint128_t>(sig_b);
-    const uint64_t quotient = static_cast<uint64_t>(num / den);
-    const __uint128_t remainder = num % den;
-
-    // Place quotient into canonical layout (implicit bit at bit 61):
-    //   quotient MSB at bit 55 → shift left by 6. LSB of quotient lands at
-    //   bit 6; sticky from remainder jams into bit 0.
-    uint64_t sig = quotient << 6;
-    if (remainder != 0) {
-        sig |= 1ULL;
-    }
-
-    // If the quotient had MSB at bit 56 (shouldn't happen after pre-shift,
-    // but handle defensively): sig would have bit 62 set → shift right.
-    if ((sig >> 62) & 1ULL) {
-        sig = shift_right_jamming(sig, 1);
-        ++exp_r;
-    }
-
-    return round_and_pack(r_sign, exp_r, sig);
+extern "C" double sf64_div_r(sf64_rounding_mode mode, double a, double b) {
+    return div_r_impl(a, b, mode);
 }
 
 extern "C" double sf64_rem(double a, double b) {
@@ -505,10 +554,14 @@ extern "C" double sf64_rem(double a, double b) {
     const uint32_t b_exp = extract_exp(bb);
 
     // fmod(±inf, y) = NaN;  fmod(x, 0) = NaN;  fmod(x, ±inf) = x when x finite.
-    if (a_exp == kExpMax)
+    if (a_exp == kExpMax) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
         return canonical_nan();
-    if (is_zero_bits(bb))
+    }
+    if (is_zero_bits(bb)) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
         return canonical_nan();
+    }
     if (b_exp == kExpMax)
         return a; // finite / inf → a itself
     if (is_zero_bits(ab))
@@ -594,7 +647,7 @@ extern "C" double sf64_rem(double a, double b) {
     }
 
     // Convert to "shifted-left-by-9" layout for round_and_pack. Round bits
-    // are zero since the remainder is exact.
+    // are zero since the remainder is exact, so `mode` is irrelevant here.
     const uint64_t sig_packed = sig_r << 9;
-    return round_and_pack(a_sign, exp_r, sig_packed);
+    return round_and_pack(a_sign, exp_r, sig_packed, SF64_RNE);
 }

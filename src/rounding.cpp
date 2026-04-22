@@ -315,6 +315,25 @@ extern "C" double sf64_rint(double x) {
 }
 
 // -----------------------------------------------------------------------------
+// rint_r — mode-parametrized integer-rounding.
+// -----------------------------------------------------------------------------
+extern "C" double sf64_rint_r(sf64_rounding_mode mode, double x) {
+    switch (mode) {
+    case SF64_RTZ:
+        return sf64_trunc(x);
+    case SF64_RUP:
+        return sf64_ceil(x);
+    case SF64_RDN:
+        return sf64_floor(x);
+    case SF64_RNA:
+        return sf64_round(x);
+    case SF64_RNE:
+    default:
+        return sf64_rint(x);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // fract = x - floor(x), with fract(-0) = +0 and fract(large) = +0
 // -----------------------------------------------------------------------------
 extern "C" double sf64_fract(double x) {

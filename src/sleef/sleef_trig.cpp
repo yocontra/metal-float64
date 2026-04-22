@@ -50,10 +50,16 @@ using soft_fp64::sleef::ddneg_dd_dd;
 using soft_fp64::sleef::ddnormalize_dd_dd;
 using soft_fp64::sleef::ddscale_dd_dd_d;
 using soft_fp64::sleef::ddsqu_dd_dd;
+using soft_fp64::sleef::eq_;
 using soft_fp64::sleef::from_bits;
+using soft_fp64::sleef::ge_;
+using soft_fp64::sleef::gt_;
 using soft_fp64::sleef::is_neg_zero;
 using soft_fp64::sleef::isinf_;
 using soft_fp64::sleef::isnan_;
+using soft_fp64::sleef::le_;
+using soft_fp64::sleef::lt_;
+using soft_fp64::sleef::ne_;
 using soft_fp64::sleef::poly_array;
 using soft_fp64::sleef::rint_;
 using soft_fp64::sleef::signbit_;
@@ -1518,7 +1524,7 @@ SF64_ALWAYS_INLINE RempiResult rempi_(double a_in) noexcept {
     x = ddmul_dd_dd_dd(x, DD{kTAU_H, kTAU_L});
 
     RempiResult r;
-    r.dd = (sf64_fabs(a_in) < 0.7) ? DD{a_in, 0.0} : x;
+    r.dd = (lt_(sf64_fabs(a_in), 0.7)) ? DD{a_in, 0.0} : x;
     r.q = q;
     return r;
 }
@@ -1544,7 +1550,7 @@ SF64_ALWAYS_INLINE DD sinpi_core(double d) noexcept {
     const int32_t cu_i = sf64_to_i32(cu);
     const int32_t q = cu_i & ~1;
     const bool o = (q & 2) != 0;
-    double s = sf64_sub(u4, static_cast<double>(q));
+    double s = sf64_sub(u4, sf64_from_i64(static_cast<int64_t>(q)));
     const double t = s;
     s = sf64_mul(s, s);
     const DD s2 = ddmul_dd_d_d(t, t);
@@ -1588,7 +1594,7 @@ SF64_ALWAYS_INLINE DD cospi_core(double d) noexcept {
     const int32_t cu_i = sf64_to_i32(cu);
     const int32_t q = cu_i & ~1;
     const bool o = (q & 2) == 0;
-    double s = sf64_sub(u4, static_cast<double>(q));
+    double s = sf64_sub(u4, sf64_from_i64(static_cast<int64_t>(q)));
     const double t = s;
     s = sf64_mul(s, s);
     const DD s2 = ddmul_dd_d_d(t, t);
@@ -1638,12 +1644,12 @@ extern "C" double sf64_sin(double d) {
     const double absd = sf64_fabs(d);
     DD s_dd;
     int32_t ql;
-    if (absd < kTRIGRANGEMAX2) {
+    if (lt_(absd, kTRIGRANGEMAX2)) {
         const double qf = rint_(sf64_mul(d, 1.0 / kPI));
         ql = sf64_to_i32(qf);
         const double u = sf64_fma(qf, sf64_neg(kPI_A2), d);
         s_dd = ddadd_dd_d_d(u, sf64_mul(qf, sf64_neg(kPI_B2)));
-    } else if (absd < kTRIGRANGEMAX) {
+    } else if (lt_(absd, kTRIGRANGEMAX)) {
         constexpr double kTwo24 = 16777216.0;
         constexpr double kTwo24Inv = 1.0 / 16777216.0;
         const double dqh = sf64_mul(trunc_(sf64_mul(d, sf64_mul(1.0 / kPI, kTwo24Inv))), kTwo24);
@@ -1659,11 +1665,11 @@ extern "C" double sf64_sin(double d) {
         s_dd = s;
     } else {
         RempiResult rr = rempi_(d);
-        const int signhi = rr.dd.hi > 0.0 ? 1 : 0;
+        const int signhi = gt_(rr.dd.hi, 0.0) ? 1 : 0;
         ql = ((rr.q & 3) * 2 + signhi + 1) >> 2;
         DD s = rr.dd;
         if ((rr.q & 1) != 0) {
-            const double sgn = rr.dd.hi > 0.0 ? 1.0 : -1.0;
+            const double sgn = gt_(rr.dd.hi, 0.0) ? 1.0 : -1.0;
             const double adj_h = sf64_mul(3.141592653589793116 * -0.5, sgn);
             const double adj_l = sf64_mul(1.2246467991473532072e-16 * -0.5, sgn);
             s = ddadd2_dd_dd(s, DD{adj_h, adj_l});
@@ -1694,13 +1700,15 @@ extern "C" double sf64_cos(double d) {
     const double absd = sf64_fabs(d);
     DD s_dd;
     int32_t ql;
-    if (absd < kTRIGRANGEMAX2) {
+    if (lt_(absd, kTRIGRANGEMAX2)) {
         const double qf = rint_(sf64_fma(absd, 1.0 / kPI, -0.5));
         ql = 2 * sf64_to_i32(qf) + 1;
-        DD s = ddadd2_dd_d_d(absd, sf64_mul(static_cast<double>(ql), sf64_mul(-kPI_A2, 0.5)));
-        s = ddadd_dd_dd_d(s, sf64_mul(static_cast<double>(ql), sf64_mul(-kPI_B2, 0.5)));
+        DD s = ddadd2_dd_d_d(
+            absd, sf64_mul(sf64_from_i64(static_cast<int64_t>(ql)), sf64_mul(-kPI_A2, 0.5)));
+        s = ddadd_dd_dd_d(
+            s, sf64_mul(sf64_from_i64(static_cast<int64_t>(ql)), sf64_mul(-kPI_B2, 0.5)));
         s_dd = s;
-    } else if (absd < kTRIGRANGEMAX) {
+    } else if (lt_(absd, kTRIGRANGEMAX)) {
         // SLEEF `xcos_u1` extended Cody-Waite:
         //   dqh_small = trunc(d * (M_1_PI/2^23) - 0.5*(M_1_PI/2^23))   [2^23 units]
         //   ql        = 2*rint(d*M_1_PI - 0.5 - dqh_small*2^23) + 1
@@ -1718,21 +1726,24 @@ extern "C" double sf64_cos(double d) {
         const double dqh = sf64_mul(dqh_small, kTwo24);
 
         double u = sf64_fma(dqh, sf64_mul(-kPI_A, 0.5), absd);
-        DD s = ddadd2_dd_d_d(u, sf64_mul(static_cast<double>(ql), sf64_mul(-kPI_A, 0.5)));
+        DD s = ddadd2_dd_d_d(
+            u, sf64_mul(sf64_from_i64(static_cast<int64_t>(ql)), sf64_mul(-kPI_A, 0.5)));
         s = ddadd2_dd_dd_d(s, sf64_mul(dqh, sf64_mul(-kPI_B, 0.5)));
-        s = ddadd2_dd_dd_d(s, sf64_mul(static_cast<double>(ql), sf64_mul(-kPI_B, 0.5)));
+        s = ddadd2_dd_dd_d(
+            s, sf64_mul(sf64_from_i64(static_cast<int64_t>(ql)), sf64_mul(-kPI_B, 0.5)));
         s = ddadd2_dd_dd_d(s, sf64_mul(dqh, sf64_mul(-kPI_C, 0.5)));
-        s = ddadd2_dd_dd_d(s, sf64_mul(static_cast<double>(ql), sf64_mul(-kPI_C, 0.5)));
-        s = ddadd_dd_dd_d(s,
-                          sf64_mul(sf64_add(dqh, static_cast<double>(ql)), sf64_mul(-kPI_D, 0.5)));
+        s = ddadd2_dd_dd_d(
+            s, sf64_mul(sf64_from_i64(static_cast<int64_t>(ql)), sf64_mul(-kPI_C, 0.5)));
+        s = ddadd_dd_dd_d(s, sf64_mul(sf64_add(dqh, sf64_from_i64(static_cast<int64_t>(ql))),
+                                      sf64_mul(-kPI_D, 0.5)));
         s_dd = s;
     } else {
         RempiResult rr = rempi_(absd);
-        const int signhi = rr.dd.hi > 0.0 ? 1 : 0;
+        const int signhi = gt_(rr.dd.hi, 0.0) ? 1 : 0;
         ql = ((rr.q & 3) * 2 + signhi + 7) >> 1;
         DD s = rr.dd;
         if ((rr.q & 1) == 0) {
-            const double sgn = rr.dd.hi > 0.0 ? 1.0 : -1.0;
+            const double sgn = gt_(rr.dd.hi, 0.0) ? 1.0 : -1.0;
             const double adj_h = sf64_mul(3.141592653589793116 * -0.5, sgn);
             const double adj_l = sf64_mul(1.2246467991473532072e-16 * -0.5, sgn);
             s = ddadd2_dd_dd(s, DD{adj_h, adj_l});
@@ -1766,16 +1777,16 @@ extern "C" double sf64_tan(double d) {
     const double absd = sf64_fabs(d);
     DD s_dd;
     int32_t ql;
-    if (absd < kTRIGRANGEMAX2) {
+    if (lt_(absd, kTRIGRANGEMAX2)) {
         const double qf = rint_(sf64_mul(d, k2_PI));
         ql = sf64_to_i32(qf);
         const double u = sf64_fma(qf, sf64_neg(kPI_A2_H), d);
         s_dd = ddadd_dd_d_d(u, sf64_mul(qf, sf64_neg(kPI_B2_H)));
-    } else if (absd < kTRIGRANGEMAX) {
+    } else if (lt_(absd, kTRIGRANGEMAX)) {
         constexpr double kTwo24 = 16777216.0;
         constexpr double kTwo24Inv = 1.0 / 16777216.0;
         const double dqh = sf64_mul(trunc_(sf64_mul(d, sf64_mul(k2_PI, kTwo24Inv))), kTwo24);
-        const double sgnhalf = (d < 0.0) ? -0.5 : 0.5;
+        const double sgnhalf = (lt_(d, 0.0)) ? -0.5 : 0.5;
         DD s_q = ddadd2_dd_d_d(sf64_mul(k2_PI, d), sf64_sub(sgnhalf, dqh));
         double qf_d = sf64_add(s_q.hi, s_q.lo);
         qf_d = trunc_(qf_d);
@@ -1841,7 +1852,7 @@ constexpr double kSinpiClamp = 2.5e8;
 extern "C" double sf64_sinpi(double x) {
     if (isnan_(x) || isinf_(x))
         return qNaN();
-    if (sf64_fabs(x) > kSinpiClamp)
+    if (gt_(sf64_fabs(x), kSinpiClamp))
         return is_neg_zero(x) ? x : 0.0;
     DD r = sinpi_core(x);
     double ret = sf64_add(r.hi, r.lo);
@@ -1853,7 +1864,7 @@ extern "C" double sf64_sinpi(double x) {
 extern "C" double sf64_cospi(double x) {
     if (isnan_(x) || isinf_(x))
         return qNaN();
-    if (sf64_fabs(x) > kSinpiClamp)
+    if (gt_(sf64_fabs(x), kSinpiClamp))
         return 1.0;
     DD r = cospi_core(x);
     return sf64_add(r.hi, r.lo);
@@ -1862,12 +1873,12 @@ extern "C" double sf64_cospi(double x) {
 extern "C" double sf64_tanpi(double x) {
     if (isnan_(x) || isinf_(x))
         return qNaN();
-    if (sf64_fabs(x) > kSinpiClamp)
+    if (gt_(sf64_fabs(x), kSinpiClamp))
         return 0.0;
     DD s = sinpi_core(x);
     DD c = cospi_core(x);
     const double ch = sf64_add(c.hi, c.lo);
-    if (ch == 0.0) {
+    if (eq_(ch, 0.0)) {
         const double sh = sf64_add(s.hi, s.lo);
         return signbit_(sh) ? sf64_neg(kInf) : kInf;
     }

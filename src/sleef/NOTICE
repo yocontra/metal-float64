@@ -7,14 +7,19 @@ Commit SHA: 6ee14c64153e6a7cb99b7da62dcff9e892a26f7a  (tag: 3.6)
 Source:     src/libm/sleefdp.c (scalar double, non-vectorised — "purec-scalar")
 License:    Boost Software License 1.0 (see below)
 
-Portions of `src/sleef/sleef_dp.cpp` and `src/sleef/sleef_common.h` are
-derived from SLEEF 3.6's scalar double-precision transcendental routines.
-The algorithmic structure (range reductions, polynomial coefficient tables,
-double-double bookkeeping) follows the upstream reference. Every host-FPU
-arithmetic op has been rewritten as a call to the appropriate `sf64_*`
-symbol (add/sub/mul/div/fma/sqrt/floor/ldexp). No upstream source is
-linked unmodified — the files here are a targeted port that preserves
-the mathematics while removing any dependency on the host FPU.
+Files under `src/sleef/` are derived from SLEEF 3.6's scalar
+double-precision transcendental routines. The algorithmic structure
+(range reductions, polynomial coefficient tables, double-double
+bookkeeping) follows the upstream reference. Every host-FPU operation
+— arithmetic (`+ - * / fma sqrt floor ldexp`), relational comparison
+(`< > <= >= == !=`), and integer → double conversion — has been
+rewritten as a call to the appropriate `sf64_*` symbol. Comparisons go
+through the `sleef::lt_` / `le_` / `gt_` / `ge_` / `eq_` / `ne_`
+helpers in `sleef_common.h`, which wrap `sf64_fcmp` with the LLVM
+predicate encoding. Integer → double casts use `sf64_from_i64`. No
+upstream source is linked unmodified — the files here are a targeted
+port that preserves the mathematics while removing every dependency on
+the host FPU.
 
 ====================================================================
 

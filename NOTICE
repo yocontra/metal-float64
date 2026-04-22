@@ -86,4 +86,3 @@ Berkeley TestFloat 3e — test oracle
 Vendored under tests/testfloat/vendor/berkeley-testfloat-3/ as a bit-exact
 IEEE-754 conformance oracle. Linked only into the test binary. Original
 COPYING preserved in the vendor subtree.
-

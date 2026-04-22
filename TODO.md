@@ -1,69 +1,43 @@
 # TODO
 
-Single source of truth for open work. Items closed at 1.0 are recorded
-in `CHANGELOG.md`, not here.
+Single source of truth for open work. Items closed at 1.0 / 1.1 are
+recorded in `CHANGELOG.md`, not here.
 
-## 1.0 — remaining
-
-- **Payne–Hanek stress breadth (libm-oracle sweep).** Extend the
-  `k ∈ {2⁴⁰, 2⁴⁵, 2⁵⁰}` corpus in
-  `tests/test_transcendental_1ulp.cpp:720-724` to also include
-  `2⁵⁰⁰` and `2⁹⁰⁰`. The MPFR-oracle sweep in
-  `tests/test_coverage_mpfr.cpp` already covers those; the gap is a
-  libm-oracle signal for the deep-reduction regime. Non-blocking for
-  the 1.0 tag but should land in the 1.0.x window.
-
-- **`sf64_sinh` overflow-boundary refinement.** The large-|x| branch at
-  `src/sleef/sleef_inv_hyp_pow.cpp:550-557` flushes to ±inf at
-  `|x| > 709.78`, but sinh doesn't actually overflow until
-  `|x| > log(2·DBL_MAX) ≈ 710.4758`. For `|x| ∈ (709.78, 710.476]`
-  sinh should return a finite value near ±DBL_MAX; the current
-  implementation returns ±inf. Fix: evaluate `exp(|x| - log 2)` in
-  that narrow band so the intermediate doesn't overflow before the
-  ×0.5. Out of the shipped `[1e-4, 20]` sweep range, so not a tier
-  violation for 1.0; landing this closes a visible edge on the
-  positive-infinity side of the real line. Non-blocking for the 1.0
-  tag.
-
-## Post-1.0
+## Post-1.1
 
 ### Numerical
 
-- **`logk_dd` DD-Horner rewrite.** `sf64_pow` drifts above U35 in the
-  "near-unit base × huge exponent" corner (`x ∈ [0.5, 2], |y| ≳ 200`)
-  because `logk_dd` in `src/sleef/sleef_inv_hyp_pow.cpp` evaluates its
-  tail polynomial on `x².hi` as a plain double, capping the log DD at
-  ~2⁻⁵⁶ relative. Fix: evaluate the minimax polynomial in full DD
-  arithmetic (DD Horner) and promote coefficient storage to DD pairs
-  for the high-degree terms. Expected to move the worst-case `pow`
-  from ~40 ULP to ≤4 ULP across the full double range. Also closes
-  the `lgamma` `(0.5, 3)` zero-crossing report-only sweep.
+- **`sf64_lgamma` zero-crossings on `(0.5, 3)`.** `lgamma(x)` vanishes
+  at `x = 1` and `x = 2`; near those zeros the result is O(1e-5) but
+  the absolute error floor of any log-of-Γ path is O(ulp(1)) ≈ 2.2e-16,
+  so the ULP ratio blows past GAMMA=1024 even with a perfectly
+  computed log ingredient. v1.1's `logk_dd` DD-Horner rewrite
+  confirmed the issue is algorithmic, not ingredient-precision. The
+  proper fix is a **zero-centered Taylor expansion** around `x=1` and
+  `x=2` — a branch inside `sf64_lgamma` that detects the vanishing
+  regime and returns `(x-1)·P₁(x)` or `(x-2)·P₂(x)` with
+  coefficients computed from the known series for `ψ(x)`. Currently
+  parked report-only in `tests/experimental/experimental_precision.cpp`;
+  gated promotion to GAMMA tier requires the rewrite to land first.
 
 ### Feature surface (not yet implemented)
 
-- **Non-RNE rounding modes.** `sf64_*_r(mode, …)` variants taking an
-  explicit mode (`SF64_RNE`, `SF64_RTZ`, `SF64_RUP`, `SF64_RDN`,
-  `SF64_RNA` — IEEE-754 §4.3). Enables hardware-emulation frontends
-  (RISC-V `frm` CSR, ARM FPCR, x86 MXCSR), interval arithmetic, and
-  freestanding runtimes. No ABI break — default stays RNE. Internal
-  round-pack primitives in `src/internal.h` already abstract the
-  rounding step; parametrize on mode. TestFloat emits vectors for all
-  five modes; MPFR oracle: swap `MPFR_RNDN`. Target: v1.1.
-- **IEEE exception flags + thread-local fenv.** Strict §7 conformance.
-  Flag bits: `SF64_FE_{INVALID, DIVBYZERO, OVERFLOW, UNDERFLOW,
-  INEXACT}` matching `<fenv.h>`. Entry points: `sf64_fe_{clear, test,
-  raise, getall}`; optional `sf64_fe_state_t` opaque `_save` /
-  `_restore` for freestanding / GPU contexts. Thread-local default
-  (`thread_local` / `__thread`); build option
-  `SOFT_FP64_FENV=tls|explicit|disabled`. Measured cost expected
-  ≤10% on the hot arithmetic path, zero when disabled. TestFloat
-  already emits expected-flag bits. Target: v1.1 / v1.2.
-- **sNaN payload preservation.** Currently quiet-on-entry (sNaN →
-  qNaN with canonical payload). Consumers needing §6.2 payload
-  preservation require a `SOFT_FP64_SNAN_PROPAGATE` build option.
-  Depends on the exception-flag work above (preservation raises
-  `SF64_FE_INVALID`). TestFloat has dedicated sNaN vectors; wire them.
-  Target: v1.2.
+- **`SOFT_FP64_FENV=explicit` caller-provided state ABI.** v1.1 reserves
+  the `explicit` mode in CMake but compiles it identically to `disabled`
+  (zero-cost no-op raise sites, `sf64_fe_*` surface present but
+  stateless). The target shape is `sf64_fe_*` variants that take an
+  `sf64_fe_state_t*` directly, enabling GPU/freestanding kernels that
+  can't rely on `thread_local`. Requires a parallel ABI to avoid
+  breaking 1.x consumers. TestFloat `run_testfloat.cpp` skips the
+  7.16M-vector flag gate under explicit mode today; wire it up once
+  the surface lands.
+- **sNaN payload preservation.** v1.0–v1.1 quiet sNaN on entry (sNaN →
+  qNaN with canonical payload). v1.1 raises `SF64_FE_INVALID` on that
+  entry when fenv is enabled. Consumers needing §6.2 full payload
+  preservation require a `SOFT_FP64_SNAN_PROPAGATE` build option that
+  preserves the signalling payload bits through the quiet-bit force.
+  TestFloat has dedicated sNaN vectors; `tests/testfloat/run_testfloat.cpp`
+  currently skips them (documented carve-out). Target: v1.2.
 - **`soft-fp128` sibling.** Same design playbook (Mesa arithmetic
   port + SLEEF transcendentals + TestFloat + MPFR oracle) extended to
   113-bit significand. Storage wrapper + full conversion matrix
@@ -79,6 +53,15 @@ in `CHANGELOG.md`, not here.
   `sf64_tgamma(x)` round-trips through an overflow-prone path for
   `|x| > 170`. Will land with whichever core release exposes
   `sf64_lgamma_r`.
+- **`_r`-variant forwarders.** Once the non-RNE `sf64_*_r` surface
+  from v1.1 is stable on the Metal target, the adapter gains
+  one-line `__acpp_sscp_soft_f64_*_r` forwarders. No core change
+  required — pure forwarding, zero ULP to add.
+- **`sf64_fe_*` surface on Metal.** The adapter may optionally
+  re-export the fenv surface for kernels that care about
+  accumulated-flag reporting. `SOFT_FP64_FENV=disabled` stays the
+  default on GPU targets (no `thread_local` support on Metal SSCP);
+  an `explicit`-state ABI (v1.2+) lines this up.
 
 ## Not on the roadmap
 

@@ -17,6 +17,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "soft_fp64/defines.h"
+#include "soft_fp64/rounding_mode.h"
 
 #include <cstdint>
 
@@ -158,6 +159,49 @@ SF64_ALWAYS_INLINE double propagate_nan(uint64_t a_bits, uint64_t b_bits) noexce
 
 SF64_ALWAYS_INLINE double canonical_nan() noexcept {
     return from_bits(kCanonicalNaN);
+}
+
+// ---- mode-parametrized rounding primitive -------------------------------
+//
+// Central decision point for the "should I round the truncated significand
+// up by one ULP?" question. Every round-and-pack site (arithmetic add/sub/
+// mul/div, sqrt, fma, and the convert.cpp u64 → f64 path) funnels through
+// this primitive so non-RNE rounding modes reach every round-affected op
+// uniformly.
+//
+// Inputs:
+//   sign       : sign bit of the pre-rounding result (0 = +, 1 = -). Only
+//                consumed by the directed modes (RUP / RDN).
+//   round_bit  : the bit immediately below the target LSB (the "guard" bit).
+//                Non-zero iff the discarded payload is at least half an ULP.
+//   sticky     : non-zero iff any bit strictly below `round_bit` is set.
+//   lsb        : the bit at the target LSB position — determines the RNE
+//                tiebreak (round to the nearest even).
+//   mode       : @ref sf64_rounding_mode
+//
+// Returns true iff the truncated significand should be incremented.
+//
+// The five modes decompose as:
+//   RNE : round_bit && (sticky || lsb)        -- tiebreak to even LSB
+//   RTZ : false                                -- always truncate
+//   RUP : sign == 0 && (round_bit || sticky)   -- any non-zero residue bumps
+//   RDN : sign != 0 && (round_bit || sticky)   --   (positives / negatives)
+//   RNA : round_bit                            -- ties away from zero
+SF64_ALWAYS_INLINE bool sf64_internal_should_round_up(uint32_t sign, bool round_bit, bool sticky,
+                                                      bool lsb, sf64_rounding_mode mode) noexcept {
+    switch (mode) {
+    case SF64_RTZ:
+        return false;
+    case SF64_RUP:
+        return (sign == 0u) && (round_bit || sticky);
+    case SF64_RDN:
+        return (sign != 0u) && (round_bit || sticky);
+    case SF64_RNA:
+        return round_bit;
+    case SF64_RNE:
+    default:
+        return round_bit && (sticky || lsb);
+    }
 }
 
 } // namespace soft_fp64::internal

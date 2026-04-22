@@ -41,10 +41,16 @@ using soft_fp64::sleef::ddneg_dd_dd;
 using soft_fp64::sleef::ddnormalize_dd_dd;
 using soft_fp64::sleef::ddscale_dd_dd_d;
 using soft_fp64::sleef::ddsqu_dd_dd;
+using soft_fp64::sleef::eq_;
 using soft_fp64::sleef::from_bits;
+using soft_fp64::sleef::ge_;
+using soft_fp64::sleef::gt_;
 using soft_fp64::sleef::isinf_;
 using soft_fp64::sleef::isnan_;
+using soft_fp64::sleef::le_;
+using soft_fp64::sleef::lt_;
 using soft_fp64::sleef::mla;
+using soft_fp64::sleef::ne_;
 using soft_fp64::sleef::rint_;
 using soft_fp64::sleef::detail::kInf;
 using soft_fp64::sleef::detail::kL2L;
@@ -210,7 +216,7 @@ DD expk2(DD d) noexcept {
     t.lo = ldexp2k_f(t.lo, q);
 
     // Very negative argument: underflow to 0.
-    if (d.hi < -1000.0)
+    if (lt_(d.hi, -1000.0))
         return DD{0.0, 0.0};
     return t;
 }
@@ -229,9 +235,9 @@ namespace soft_fp64::sleef {
 double sf64_internal_exp_core(double d) {
     if (isnan_(d))
         return qNaN();
-    if (d > 709.782712893383996732223)
+    if (gt_(d, 709.782712893383996732223))
         return kInf; // overflow
-    if (d < -1000.0)
+    if (lt_(d, -1000.0))
         return 0.0; // hard underflow
 
     // q = round(d * R_LN2)
@@ -253,7 +259,7 @@ double sf64_internal_exp_core(double d) {
     // Rescale by 2^q.
     double r = sf64_ldexp(u, q);
 
-    if (d > 709.0 && (isinf_(r) || r > 1.7976931348623157e+308))
+    if (gt_(d, 709.0) && (isinf_(r) || gt_(r, 1.7976931348623157e+308)))
         return kInf;
     return r;
 }
@@ -262,9 +268,9 @@ double sf64_internal_exp_core(double d) {
 // sf64_internal_log_core — SLEEF xlog_u1 (u10) — degree-7 minimax + DD re-assembly.
 // ----------------------------------------------------------------------
 double sf64_internal_log_core(double d) {
-    if (isnan_(d) || d < 0.0)
+    if (isnan_(d) || lt_(d, 0.0))
         return qNaN();
-    if (d == 0.0)
+    if (eq_(d, 0.0))
         return sf64_neg(kInf);
     if (isinf_(d))
         return kInf;
@@ -274,7 +280,7 @@ double sf64_internal_log_core(double d) {
     constexpr double kDblMin = 2.2250738585072014e-308;
     constexpr double kScale = 4.294967296e9 * 4.294967296e9; // 2^64 (folded)
     bool subnormal_bump = false;
-    if (d < kDblMin) {
+    if (lt_(d, kDblMin)) {
         d = sf64_mul(d, kScale);
         subnormal_bump = true;
     }
@@ -324,9 +330,9 @@ extern "C" double sf64_exp(double x) {
 extern "C" double sf64_exp2(double x) {
     if (isnan_(x))
         return qNaN();
-    if (x >= 1024.0)
+    if (ge_(x, 1024.0))
         return kInf;
-    if (x <= -2000.0)
+    if (le_(x, -2000.0))
         return 0.0;
 
     // q = round(x), s = x - q    (|s| <= 0.5)
@@ -352,9 +358,9 @@ extern "C" double sf64_exp2(double x) {
 extern "C" double sf64_exp10(double x) {
     if (isnan_(x))
         return qNaN();
-    if (x > 308.25471555991671)
+    if (gt_(x, 308.25471555991671))
         return kInf;
-    if (x < -350.0)
+    if (lt_(x, -350.0))
         return 0.0;
 
     // q = round(x * log2(10))
@@ -383,9 +389,9 @@ extern "C" double sf64_exp10(double x) {
 extern "C" double sf64_expm1(double x) {
     if (isnan_(x))
         return qNaN();
-    if (x > 709.782712893383996732223)
+    if (gt_(x, 709.782712893383996732223))
         return kInf;
-    if (x < -36.736800569677101399113302437)
+    if (lt_(x, -36.736800569677101399113302437))
         return -1.0;
 
     // d = expk2(x) - 1 in DD, then collapse.
@@ -407,9 +413,9 @@ extern "C" double sf64_log(double x) {
 // sf64_log2 — SLEEF xlog2 (u10) — same reduction, different DD fold-in.
 // ----------------------------------------------------------------------
 extern "C" double sf64_log2(double x) {
-    if (isnan_(x) || x < 0.0)
+    if (isnan_(x) || lt_(x, 0.0))
         return qNaN();
-    if (x == 0.0)
+    if (eq_(x, 0.0))
         return sf64_neg(kInf);
     if (isinf_(x))
         return kInf;
@@ -417,7 +423,7 @@ extern "C" double sf64_log2(double x) {
     constexpr double kDblMin = 2.2250738585072014e-308;
     constexpr double kScale = 4.294967296e9 * 4.294967296e9;
     bool sub = false;
-    if (x < kDblMin) {
+    if (lt_(x, kDblMin)) {
         x = sf64_mul(x, kScale);
         sub = true;
     }
@@ -442,9 +448,9 @@ extern "C" double sf64_log2(double x) {
 // sf64_log10 — SLEEF xlog10 (u10).
 // ----------------------------------------------------------------------
 extern "C" double sf64_log10(double x) {
-    if (isnan_(x) || x < 0.0)
+    if (isnan_(x) || lt_(x, 0.0))
         return qNaN();
-    if (x == 0.0)
+    if (eq_(x, 0.0))
         return sf64_neg(kInf);
     if (isinf_(x))
         return kInf;
@@ -452,7 +458,7 @@ extern "C" double sf64_log10(double x) {
     constexpr double kDblMin = 2.2250738585072014e-308;
     constexpr double kScale = 4.294967296e9 * 4.294967296e9;
     bool sub = false;
-    if (x < kDblMin) {
+    if (lt_(x, kDblMin)) {
         x = sf64_mul(x, kScale);
         sub = true;
     }
@@ -477,11 +483,11 @@ extern "C" double sf64_log10(double x) {
 // sf64_log1p — SLEEF xlog1p (u10).
 // ----------------------------------------------------------------------
 extern "C" double sf64_log1p(double x) {
-    if (isnan_(x) || x < -1.0)
+    if (isnan_(x) || lt_(x, -1.0))
         return qNaN();
-    if (x == -1.0)
+    if (eq_(x, -1.0))
         return sf64_neg(kInf);
-    if (isinf_(x) && x > 0.0)
+    if (isinf_(x) && gt_(x, 0.0))
         return kInf;
 
     // dp1 = d + 1; exponent comes from dp1 * 4/3.
@@ -490,7 +496,7 @@ extern "C" double sf64_log1p(double x) {
     constexpr double kScale = 4.294967296e9 * 4.294967296e9;
     bool sub = false;
     double dp1s = dp1;
-    if (dp1s < kDblMin) {
+    if (lt_(dp1s, kDblMin)) {
         dp1s = sf64_mul(dp1s, kScale);
         sub = true;
     }

@@ -62,6 +62,32 @@ SF64_ALWAYS_INLINE double abs_(double x) noexcept {
     return sf64_fabs(x);
 }
 
+// Relational predicates — every comparison on a `double` lvalue inside the
+// SLEEF layer goes through `sf64_fcmp` so it stays bit-exact on targets
+// without native fp64. LLVM FCmpInst::Predicate encoding (see
+// include/soft_fp64/soft_f64.h § fcmp predicates): 1=OEQ, 2=OGT, 3=OGE,
+// 4=OLT, 5=OLE, 14=UNE. C++'s relational operators map to the ordered
+// predicates (NaN on either side ⇒ false); `!=` matches UNE because
+// `NaN != x` is true in C++.
+SF64_ALWAYS_INLINE bool lt_(double a, double b) noexcept {
+    return sf64_fcmp(a, b, 4) != 0;
+}
+SF64_ALWAYS_INLINE bool le_(double a, double b) noexcept {
+    return sf64_fcmp(a, b, 5) != 0;
+}
+SF64_ALWAYS_INLINE bool gt_(double a, double b) noexcept {
+    return sf64_fcmp(a, b, 2) != 0;
+}
+SF64_ALWAYS_INLINE bool ge_(double a, double b) noexcept {
+    return sf64_fcmp(a, b, 3) != 0;
+}
+SF64_ALWAYS_INLINE bool eq_(double a, double b) noexcept {
+    return sf64_fcmp(a, b, 1) != 0;
+}
+SF64_ALWAYS_INLINE bool ne_(double a, double b) noexcept {
+    return sf64_fcmp(a, b, 14) != 0;
+}
+
 // Integer power-of-two multiplier — uses sf64_ldexp so no host FPU.
 SF64_ALWAYS_INLINE double pow2i(int q) noexcept {
     // 1.0 * 2^q via ldexp.

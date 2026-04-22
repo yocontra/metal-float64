@@ -26,6 +26,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "internal.h"
+#include "internal_fenv.h"
 #include "soft_fp64/soft_f64.h"
 
 #include <cstdint>
@@ -112,7 +113,9 @@ SF64_ALWAYS_INLINE IntSqrtResult isqrt_bits(uint64_t radicand_hi, uint64_t radic
 
 // ---- sqrt ----------------------------------------------------------------
 
-extern "C" double sf64_sqrt(double x) {
+namespace {
+
+SF64_ALWAYS_INLINE double sqrt_r_impl(double x, sf64_rounding_mode mode) noexcept {
     // SAFETY: __builtin_bit_cast punning double <-> uint64 is the documented
     // IEEE-754 field-access technique; no UB because both types have the
     // same size and no trap representations.
@@ -131,7 +134,8 @@ extern "C" double sf64_sqrt(double x) {
         }
         // Infinity.
         if (sign != 0) {
-            // sqrt(-inf) = NaN.
+            // sqrt(-inf) = NaN (invalid).
+            SF64_FE_RAISE(SF64_FE_INVALID);
             return canonical_nan();
         }
         // sqrt(+inf) = +inf.
@@ -142,7 +146,8 @@ extern "C" double sf64_sqrt(double x) {
         return x;
     }
     if (sign != 0) {
-        // Negative finite -> NaN.
+        // Negative finite -> NaN (sqrt of negative is invalid).
+        SF64_FE_RAISE(SF64_FE_INVALID);
         return canonical_nan();
     }
 
@@ -270,17 +275,21 @@ extern "C" double sf64_sqrt(double x) {
     const uint64_t root53 = root >> 1;
     const bool sticky = remainder_nonzero;
 
-    // Round-to-nearest-even. root53 is the truncated integer sqrt; the
-    // fractional part of the true result is:
-    //   - 0          if guard_bit == 0 && !sticky
-    //   - in (0, 0.5) if guard_bit == 0 && sticky
-    //   - exactly 0.5 if guard_bit == 1 && !sticky
-    //   - in (0.5, 1) if guard_bit == 1 && sticky
+    // sqrt is always positive (sign = 0). Route through the shared mode-
+    // parametrized decision so RTZ/RUP/RDN/RNA propagate.
     uint64_t rounded = root53;
-    if (guard_bit != 0) {
-        if (sticky || (root53 & 1u) != 0) {
-            rounded = root53 + 1u;
-        }
+    if (sf64_internal_should_round_up(/*sign=*/0u, guard_bit != 0, sticky, (root53 & 1u) != 0,
+                                      mode)) {
+        rounded = root53 + 1u;
+    }
+
+    // INEXACT if the integer-sqrt dropped a nonzero guard or left a nonzero
+    // remainder. sqrt of a finite positive never underflows to subnormal
+    // (smallest input is 2^-1074 → sqrt ~ 2^-537, well inside normal range)
+    // and never overflows (largest input ~ 2^1024 → sqrt ~ 2^512). The
+    // clamps below stay as defence-in-depth but don't need fenv raises.
+    if (guard_bit != 0 || sticky) {
+        SF64_FE_RAISE(SF64_FE_INEXACT);
     }
 
     // `rounded` now has 53 bits, MSB at bit 52 — except if rounding caused
@@ -305,6 +314,16 @@ extern "C" double sf64_sqrt(double x) {
 
     const uint64_t out_frac = rounded & kFracMask;
     return from_bits(pack(0u, static_cast<uint32_t>(biased_new_exp), out_frac));
+}
+
+} // namespace
+
+extern "C" double sf64_sqrt(double x) {
+    return sqrt_r_impl(x, SF64_RNE);
+}
+
+extern "C" double sf64_sqrt_r(sf64_rounding_mode mode, double x) {
+    return sqrt_r_impl(x, mode);
 }
 
 // ---- rsqrt ---------------------------------------------------------------
@@ -339,13 +358,11 @@ SF64_ALWAYS_INLINE int highest_bit_u128(__uint128_t v) noexcept {
     return 63 - __builtin_clzll(lo);
 }
 
-// Round a (mag, frame_exp) representation to a packed IEEE-754 binary64
-// using round-to-nearest-ties-to-even. Value = mag * 2^frame_exp.
-//
-// Handles normals, subnormals, and overflow to infinity in a single
-// rounding step (no double rounding).
-SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, __uint128_t mag,
-                                         int64_t frame_exp) noexcept {
+// Mode-parametrized round-and-pack for a (mag, frame_exp) representation.
+// Value = mag * 2^frame_exp. Handles normals, subnormals, and overflow in a
+// single rounding step (no double rounding).
+SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, __uint128_t mag, int64_t frame_exp,
+                                         sf64_rounding_mode mode) noexcept {
     if (mag == 0) {
         return make_signed_zero(sign);
     }
@@ -355,11 +372,22 @@ SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, __uint128_t mag,
     const int64_t unbiased = frame_exp + static_cast<int64_t>(msb);
     int64_t biased = unbiased + static_cast<int64_t>(kExpBias);
 
-    // Overflow to infinity.
+    // Overflow to infinity. Directed modes round to max-finite in the
+    // direction that truncates away from infinity.
     if (biased >= static_cast<int64_t>(kExpMax)) {
-        // Still need to check that rounding doesn't change anything, but at
-        // exponents this large the rounded result is always infinity.
-        return make_signed_inf(sign);
+        SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+        switch (mode) {
+        case SF64_RTZ:
+            return from_bits(pack(sign, kExpMax - 1, kFracMask));
+        case SF64_RUP:
+            return sign == 0u ? make_signed_inf(0u) : from_bits(pack(1u, kExpMax - 1, kFracMask));
+        case SF64_RDN:
+            return sign != 0u ? make_signed_inf(1u) : from_bits(pack(0u, kExpMax - 1, kFracMask));
+        case SF64_RNE:
+        case SF64_RNA:
+        default:
+            return make_signed_inf(sign);
+        }
     }
 
     // Determine the target LSB position within `mag` for the rounded result.
@@ -394,6 +422,10 @@ SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, __uint128_t mag,
         output_subnormal = true;
     }
 
+    // Track whether the round step dropped any nonzero guard/sticky bits
+    // so we can raise INEXACT / UNDERFLOW correctly at the end.
+    bool round_inexact = false;
+
     uint64_t rounded_mant; // for normal: 53-bit with MSB at 52 (implicit)
                            // for subnormal: up to 53-bit frac field
     if (target_lsb <= 0) {
@@ -405,13 +437,18 @@ SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, __uint128_t mag,
             rounded_mant = rounded_mant << (-target_lsb);
         }
     } else if (target_lsb >= 128) {
-        // Rounding position is at or below the entire 128-bit frame: the
-        // true value is smaller than half the smallest representable. Per
-        // IEEE 754 default rounding, rounds to zero (with sign).
-        // Edge: at target_lsb == 128 the round bit is bit 127 of mag; if
-        // mag > 0 we'd technically need to check. But by our frame
-        // construction mag never has bit 127 set when target_lsb >= 128
-        // for subnormals — the value is truly negligible.
+        // Rounding position is at or below the entire 128-bit frame — the
+        // true value is smaller than half an ULP of the smallest subnormal.
+        // Under RNE/RTZ/RNA this rounds to ±0. Under RUP a positive mag
+        // bumps to the smallest positive subnormal; under RDN a negative
+        // mag bumps to the smallest negative subnormal.
+        if (mag != 0) {
+            // Tiny-before-rounding and inexact by construction.
+            SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+            if ((mode == SF64_RUP && sign == 0u) || (mode == SF64_RDN && sign != 0u)) {
+                return from_bits(pack(sign, 0u, 1u));
+            }
+        }
         return make_signed_zero(sign);
     } else {
         // Need to round. target_lsb in [1, 127].
@@ -424,14 +461,23 @@ SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, __uint128_t mag,
         } else {
             sticky = false;
         }
+        round_inexact = round_bit || sticky;
         const __uint128_t trunc = mag >> target_lsb;
         rounded_mant = static_cast<uint64_t>(trunc);
-        if (round_bit && (sticky || (rounded_mant & 1u) != 0)) {
+        const bool lsb = (rounded_mant & 1u) != 0;
+        if (sf64_internal_should_round_up(sign, round_bit, sticky, lsb, mode)) {
             rounded_mant += 1u;
         }
     }
 
     if (output_subnormal) {
+        // IEEE 754 §7.5 (tiny-before-rounding flavour): subnormal output
+        // with any rounding loss raises UNDERFLOW+INEXACT. Rounding up into
+        // the smallest normal still counts as an underflow event — the
+        // pre-round value was tiny.
+        if (round_inexact) {
+            SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+        }
         // Check if rounding pushed us into the normal range.
         if ((rounded_mant & kImplicitBit) != 0) {
             // Became the smallest normal (exp_biased = 1, frac = 0 or the
@@ -441,21 +487,38 @@ SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, __uint128_t mag,
         return from_bits(pack(sign, 0u, rounded_mant));
     }
 
+    if (round_inexact) {
+        SF64_FE_RAISE(SF64_FE_INEXACT);
+    }
+
     // Normal. rounded_mant has 53 bits (MSB at 52) or 54 bits if rounding
     // caused a carry — in which case shift right and bump exponent.
     if ((rounded_mant & (uint64_t{1} << 53)) != 0) {
         rounded_mant >>= 1;
         biased += 1;
         if (biased >= static_cast<int64_t>(kExpMax)) {
-            return make_signed_inf(sign);
+            SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+            switch (mode) {
+            case SF64_RTZ:
+                return from_bits(pack(sign, kExpMax - 1, kFracMask));
+            case SF64_RUP:
+                return sign == 0u ? make_signed_inf(0u)
+                                  : from_bits(pack(1u, kExpMax - 1, kFracMask));
+            case SF64_RDN:
+                return sign != 0u ? make_signed_inf(1u)
+                                  : from_bits(pack(0u, kExpMax - 1, kFracMask));
+            case SF64_RNE:
+            case SF64_RNA:
+            default:
+                return make_signed_inf(sign);
+            }
         }
     }
     return from_bits(pack(sign, static_cast<uint32_t>(biased), rounded_mant & kFracMask));
 }
 
-} // namespace
-
-extern "C" double sf64_fma(double a, double b, double c) {
+SF64_ALWAYS_INLINE double fma_r_impl(double a, double b, double c,
+                                     sf64_rounding_mode mode) noexcept {
     const uint64_t ba = bits_of(a);
     const uint64_t bb = bits_of(b);
     const uint64_t bc = bits_of(c);
@@ -481,6 +544,13 @@ extern "C" double sf64_fma(double a, double b, double c) {
 
     const uint32_t sign_ab = sa ^ sb;
 
+    // IEEE §7.2: the 0×∞ sub-operation is invalid regardless of c. Raise
+    // INVALID before propagating NaN so that fma(0, ∞, qNaN) signals it.
+    if ((a_inf && b_zero) || (a_zero && b_inf)) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
+        return canonical_nan();
+    }
+
     // NaN propagation.
     if (a_nan || b_nan || c_nan) {
         // IEEE 754: fma(inf, 0, qNaN) returns qNaN (even though inf*0 would
@@ -492,18 +562,14 @@ extern "C" double sf64_fma(double a, double b, double c) {
         return from_bits(bc | kQuietNaNBit);
     }
 
-    // inf * 0 = NaN, regardless of c.
-    if ((a_inf && b_zero) || (a_zero && b_inf)) {
-        return canonical_nan();
-    }
-
     // If a*b is inf:
     if (a_inf || b_inf) {
         // a*b = signed inf.
         if (c_inf) {
-            // inf + inf = inf if signs match; inf - inf = NaN otherwise.
+            // inf + inf = inf if signs match; inf - inf = NaN (invalid).
             if (sign_ab == sc)
                 return make_signed_inf(sign_ab);
+            SF64_FE_RAISE(SF64_FE_INVALID);
             return canonical_nan();
         }
         return make_signed_inf(sign_ab);
@@ -515,14 +581,16 @@ extern "C" double sf64_fma(double a, double b, double c) {
     }
 
     // Handle a*b == 0 separately: result is c, but sign handling for the
-    // 0 + 0 case needs care (sign(0+0) = +0 unless both are -0, per IEEE).
+    // 0 + 0 case follows IEEE 754-2008 §6.3 — opposite-sign zero sum is
+    // -0 under RDN and +0 under all other modes.
     if (a_zero || b_zero) {
         if (is_zero_bits(bc)) {
-            // 0 + 0: per IEEE 754, result is +0 unless both signs negative.
-            if (sign_ab == 1u && sc == 1u) {
-                return make_signed_zero(1u);
+            if (sign_ab == sc) {
+                // Like signs: result keeps that sign.
+                return make_signed_zero(sign_ab);
             }
-            return make_signed_zero(0u);
+            // Opposite signs: +0 under RNE/RTZ/RUP/RNA, -0 under RDN.
+            return make_signed_zero(mode == SF64_RDN ? 1u : 0u);
         }
         return c;
     }
@@ -570,7 +638,7 @@ extern "C" double sf64_fma(double a, double b, double c) {
     if (is_zero_bits(bc)) {
         // Result is just the signed product; defer all rounding to the
         // single-rounding helper.
-        return round_and_pack(sign_ab, prod, prod_exp);
+        return round_and_pack(sign_ab, prod, prod_exp, mode);
     }
 
     // c is nonzero, finite. Normalise it.
@@ -662,8 +730,9 @@ extern "C" double sf64_fma(double a, double b, double c) {
             result_sign = sc;
         }
         if (mag == 0) {
-            // Exact cancellation: result is +0 (IEEE 754 default rounding).
-            return make_signed_zero(0u);
+            // Exact cancellation: +0 under RNE/RTZ/RUP/RNA, -0 under RDN
+            // (IEEE 754-2008 §6.3).
+            return make_signed_zero(mode == SF64_RDN ? 1u : 0u);
         }
     }
 
@@ -681,5 +750,15 @@ extern "C" double sf64_fma(double a, double b, double c) {
     // 0 to the correct direction).
 
     // Single rounding step covering normal, subnormal, and overflow.
-    return round_and_pack(result_sign, mag, E);
+    return round_and_pack(result_sign, mag, E, mode);
+}
+
+} // namespace
+
+extern "C" double sf64_fma(double a, double b, double c) {
+    return fma_r_impl(a, b, c, SF64_RNE);
+}
+
+extern "C" double sf64_fma_r(sf64_rounding_mode mode, double a, double b, double c) {
+    return fma_r_impl(a, b, c, mode);
 }

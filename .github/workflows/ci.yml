@@ -103,6 +103,49 @@ jobs:
         run: ctest --test-dir build -V --output-on-failure
 
   # ---------------------------------------------------------------------------
+  # 1b. SOFT_FP64_FENV=disabled build + ctest.
+  #
+  # 1.1 ships the fenv surface with a three-way mode switch:
+  #   tls      — thread_local flag accumulator (default on hosted)
+  #   disabled — SF64_FE_RAISE compiles to (void)0; sf64_fe_* return 0
+  #   explicit — reserved for 1.2+ caller-state ABI (currently same as disabled)
+  #
+  # The matrix above uses the tls default. This cell exercises the disabled
+  # path so a stray reference to `sf64_internal_fe_flags` outside the
+  # SOFT_FP64_FENV_MODE guard (which would compile fine under tls but fail
+  # to link under disabled) can't ship silently. Ubuntu 24.04 + clang Release
+  # is enough — the fenv plumbing is architecture-independent, so one cell
+  # suffices for CI purposes.
+  # ---------------------------------------------------------------------------
+  build-test-fenv-disabled:
+    name: build-test (fenv=disabled)
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpfr-dev libgmp-dev
+
+      - name: Configure (fenv=disabled)
+        run: |
+          cmake -B build-fenv-off -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DSOFT_FP64_FENV=disabled
+
+      - name: Build
+        run: cmake --build build-fenv-off --parallel
+
+      - name: Test
+        run: ctest --test-dir build-fenv-off -V --output-on-failure
+
+  # ---------------------------------------------------------------------------
   # 2. ASan + UBSan (single config — no threading, so no TSan; MSan deferred).
   # ---------------------------------------------------------------------------
   sanitizers:
@@ -432,32 +475,29 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # 7. clang-format lint. Pinned to clang-format-19 for deterministic output;
-  # different clang-format versions disagree on whitespace/indent-PP rules, so
-  # the lint rule locks a single version that matches the committed tree.
+  # 7. Lint — runs `prek` (https://github.com/j178/prek) against the
+  # committed `.pre-commit-config.yaml`. All lint rules (clang-format
+  # pinned to v19, whitespace hygiene, large-file guard, etc.) live in
+  # that config, so CI and local runs agree. Any uncommitted diff after
+  # the run fails the job; the patch is printed to the log.
+  #
+  # Bump prek by updating PREK_VERSION below. Bump lint rules (including
+  # the clang-format rev) by editing `.pre-commit-config.yaml`.
   # ---------------------------------------------------------------------------
   lint:
-    name: clang-format
+    name: prek
     runs-on: ubuntu-24.04
+    env:
+      # Pinned for reproducibility. Bump this and the lint rules in
+      # `.pre-commit-config.yaml` together.
+      PREK_VERSION: '0.3.10'
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang-format-19 (pinned)
-        run: |
-          sudo apt-get update
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/apt.llvm.org.gpg
-          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-19.list
-          sudo apt-get update
-          sudo apt-get install -y clang-format-19
-      - name: clang-format-19 check
-        # Vendored third-party trees are checked in verbatim — never
-        # reformat them.
-        run: |
-          find include src tests fuzz bench \
-              \( -path 'tests/testfloat/vendor' -o -path 'bench/external' \) -prune -o \
-              \( -name '*.h' -o -name '*.cpp' \) -print \
-            | xargs clang-format-19 --dry-run --Werror
+      - name: Install prek ${{ env.PREK_VERSION }}
+        # pipx is preinstalled on ubuntu-24.04 runners.
+        run: pipx install "prek==${PREK_VERSION}"
+      - name: prek run --all-files
+        run: prek run --all-files --show-diff-on-failure --color=always
 
   # ---------------------------------------------------------------------------
   # 8. Comparative bench vs Berkeley SoftFloat 3e and ckormanyos/soft_double.

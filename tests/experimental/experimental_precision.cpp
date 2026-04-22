@@ -9,13 +9,14 @@
 //      or test_mpfr_diff.cpp with a tier from the spec bucket (U35/GAMMA).
 //   3. delete its entry from this file.
 //
-// Currently parked (blocked on the `logk_dd` DD-Horner rewrite tracked in
-// TODO.md; the polynomial tail inside `logk_dd` truncates the DD low word
-// and caps relative precision at ~2^-56 instead of 2^-105, which propagates
-// into ~5e-17 absolute error — 80 k ULP relative to the near-zero result):
-//   * sf64_lgamma zero-crossings [0.5, 3) — ULP ratio explodes against
-//     a near-zero value even though the absolute error is already at the
-//     IEEE-double working precision floor.
+// Currently parked:
+//   * sf64_lgamma zero-crossings [0.5, 3) — lgamma(x) vanishes at x=1
+//     and x=2. Near those zeros the result is O(1e-5) but the absolute
+//     error floor of any log-of-Γ path is O(ulp(1)) = 2.2e-16, so the
+//     ULP ratio inherently blows past GAMMA=1024 even with perfectly
+//     computed ingredients. The true fix is a zero-centered Taylor
+//     expansion of lgamma around x=1 and x=2 (not better log precision);
+//     that's a self-contained algorithm change tracked in TODO.md.
 //
 // SPDX-License-Identifier: MIT
 
@@ -105,8 +106,9 @@ int main() {
     std::printf("These sweeps are NOT gated. Any widening is a v1.2 item.\n\n");
 
     // lgamma zero-crossings at x = 1 and x = 2. ULP ratio explodes against
-    // a near-zero value even though the absolute error stays ≈ 5e-17 (floor
-    // from `logk_dd`'s plain-double polynomial tail — v1.2).
+    // a near-zero value even though the absolute error is near the double
+    // working-precision floor (~5e-17). A zero-centered Taylor rewrite is
+    // the algorithm change needed here — not better log precision.
     auto s_lgamma = sweep_uniform(
         "lgamma_zero_crossing [0.5, 3)", 0.5, 3.0, 10000, 0x1DE00FULL,
         [](double x) { return sf64_lgamma(x); }, [](double x) { return std::lgamma(x); });

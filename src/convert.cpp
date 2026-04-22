@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "internal.h"
+#include "internal_fenv.h"
 #include "soft_fp64/soft_f64.h"
 
 #include <climits>
@@ -38,12 +39,15 @@ using soft_fp64::internal::kImplicitBit;
 using soft_fp64::internal::kQuietNaNBit;
 using soft_fp64::internal::kSignMask;
 using soft_fp64::internal::pack;
+using soft_fp64::internal::sf64_internal_should_round_up;
 
 // ---- u64 -> f64 (core integer widening path) ----------------------------
 //
 // Takes a non-zero 64-bit magnitude, returns the correctly-rounded fp64 bit
-// pattern (sign = 0). The caller applies the sign separately.
-SF64_ALWAYS_INLINE uint64_t u64_magnitude_to_fp64_bits(uint64_t mag) noexcept {
+// pattern with the caller-supplied sign (directed-mode rounding needs the
+// sign at the decision point).
+SF64_ALWAYS_INLINE uint64_t u64_magnitude_to_fp64_bits(uint64_t mag, uint32_t sign,
+                                                       sf64_rounding_mode mode) noexcept {
     // Pre: mag != 0.
     //
     // Find the position of the leading 1. After a left-shift by `lz`, the
@@ -61,20 +65,23 @@ SF64_ALWAYS_INLINE uint64_t u64_magnitude_to_fp64_bits(uint64_t mag) noexcept {
         // lands at bit 52; strip the implicit bit afterwards.
         const int shift = kFracBits - msb_pos;
         frac = (mag << shift) & kFracMask;
-        return pack(0u, exp, frac);
+        return pack(sign, exp, frac);
     }
 
     // msb_pos in [53, 63] — we need to round.
     const int shift = msb_pos - kFracBits;  // in [1, 11]
     const uint64_t mantissa = mag >> shift; // 53 bits including implicit
-    const uint64_t dropped_mask = (uint64_t{1} << shift) - 1u;
-    const uint64_t dropped = mag & dropped_mask;
-    const uint64_t halfway = uint64_t{1} << (shift - 1);
+    const uint64_t round_pos = uint64_t{1} << (shift - 1);
+    const bool round_bit = (mag & round_pos) != 0;
+    const bool sticky = shift >= 2 && (mag & (round_pos - 1u)) != 0;
+    const bool lsb = (mantissa & 1u) != 0;
 
-    // Round-to-nearest-even: round up if dropped > halfway, or (dropped == halfway
-    // && mantissa is odd).
+    if (round_bit || sticky) {
+        SF64_FE_RAISE(SF64_FE_INEXACT);
+    }
+
     uint64_t rounded = mantissa;
-    if (dropped > halfway || (dropped == halfway && (mantissa & 1u))) {
+    if (sf64_internal_should_round_up(sign, round_bit, sticky, lsb, mode)) {
         rounded += 1u;
     }
 
@@ -83,15 +90,15 @@ SF64_ALWAYS_INLINE uint64_t u64_magnitude_to_fp64_bits(uint64_t mag) noexcept {
     if (rounded & (uint64_t{1} << (kFracBits + 1))) {
         // Overflow to next binade — leading implicit bit shifts to bit 53.
         const uint32_t new_exp = exp + 1u;
-        return pack(0u, new_exp, 0u);
+        return pack(sign, new_exp, 0u);
     }
 
     const uint64_t frac_out = rounded & kFracMask;
-    return pack(0u, exp, frac_out);
+    return pack(sign, exp, frac_out);
 }
 
 // ---- signed 64-bit integer -> f64 ---------------------------------------
-SF64_ALWAYS_INLINE double i64_to_fp64(int64_t x) noexcept {
+SF64_ALWAYS_INLINE double i64_to_fp64(int64_t x, sf64_rounding_mode mode) noexcept {
     if (x == 0)
         return from_bits(0u);
 
@@ -110,29 +117,24 @@ SF64_ALWAYS_INLINE double i64_to_fp64(int64_t x) noexcept {
         mag = raw;
     }
 
-    uint64_t bits = u64_magnitude_to_fp64_bits(mag);
-    // OR in the sign bit.
-    bits |= (static_cast<uint64_t>(sign) << 63);
-    return from_bits(bits);
+    return from_bits(u64_magnitude_to_fp64_bits(mag, sign, mode));
 }
 
 // ---- unsigned 64-bit integer -> f64 -------------------------------------
-SF64_ALWAYS_INLINE double u64_to_fp64(uint64_t x) noexcept {
+SF64_ALWAYS_INLINE double u64_to_fp64(uint64_t x, sf64_rounding_mode mode) noexcept {
     if (x == 0)
         return from_bits(0u);
-    return from_bits(u64_magnitude_to_fp64_bits(x));
+    return from_bits(u64_magnitude_to_fp64_bits(x, /*sign=*/0u, mode));
 }
 
-// ---- f64 -> u64 magnitude, saturating & truncating ----------------------
+// ---- f64 -> u64 magnitude, mode-rounding & saturating -------------------
 //
-// Returns the magnitude of `x` truncated toward zero, saturated to
-// [0, 2^64 - 1]. Sign is handled by the caller. NaN returns 0. +inf / overflow
-// returns UINT64_MAX; negative overflow returns UINT64_MAX (caller maps to
-// 0 for unsigned dest or INT64_MIN for signed dest).
-//
-// `too_large` is set when the truncated magnitude does not fit in 64 bits.
-SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, bool* too_large,
-                                                  bool* is_nan) noexcept {
+// Returns the magnitude of `x` rounded to integer per `mode`, saturated to
+// [0, 2^64 - 1]. Sign is used only for the rounding-mode decision at the
+// fractional boundary (directed modes depend on it). NaN sets `is_nan`.
+// +inf / finite overflow sets `too_large` and returns UINT64_MAX.
+SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, uint32_t sign, sf64_rounding_mode mode,
+                                                  bool* too_large, bool* is_nan) noexcept {
     const uint64_t b = bits_of(x);
     const uint32_t exp = extract_exp(b);
     const uint64_t frac = extract_frac(b);
@@ -142,52 +144,98 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, bool* too_large,
 
     if (exp == kExpMax) {
         if (frac != 0) {
+            // NaN → int is invalid.
+            SF64_FE_RAISE(SF64_FE_INVALID);
             *is_nan = true;
             return 0;
         }
-        // Infinity: caller saturates.
+        // ±inf → out-of-range saturation is invalid (IEEE 754 §7.2).
+        SF64_FE_RAISE(SF64_FE_INVALID);
         *too_large = true;
         return ~uint64_t{0};
     }
 
-    // Unbiased exponent (value of MSB position in mantissa form).
     const int e = static_cast<int>(exp) - kExpBias;
-    if (exp == 0 || e < 0) {
-        // Zero, subnormal, or |x| < 1 — truncates to 0.
+    if (exp == 0 || e < -1) {
+        // |x| < 0.5 (including zero, subnormals). Truncates to 0 under
+        // RNE/RTZ/RNA; directed modes bump magnitude to 1 only for the sign
+        // that points away from zero.
+        if (exp == 0 && frac == 0) {
+            return 0; // exact zero, no rounding decision
+        }
+        // Any non-zero input < 0.5 rounds to 0 or ±1 → inexact.
+        SF64_FE_RAISE(SF64_FE_INEXACT);
+        const bool nonzero = true;
+        if ((mode == SF64_RUP && sign == 0u && nonzero) ||
+            (mode == SF64_RDN && sign != 0u && nonzero)) {
+            return 1u;
+        }
         return 0;
     }
 
-    // Mantissa with implicit bit. 53 bits wide with MSB at bit 52.
     const uint64_t mant = frac | kImplicitBit;
 
-    // Shift so that the integer part of the mantissa aligns with bit 0.
-    // If e > 52, left-shift by (e - 52) — but only up to 11 shifts fit
-    // without overflowing a 64-bit value (since the leading bit already
-    // sits at bit 52, shifting by 11 lands it at bit 63). Any e > 63
-    // means the integer part has 65+ bits → overflow.
+    if (e == -1) {
+        // |x| in [0.5, 1). Truncated magnitude is 0; dropped bits are the
+        // entire mantissa. round_bit = implicit bit (true), sticky = frac != 0.
+        SF64_FE_RAISE(SF64_FE_INEXACT);
+        const bool round_bit = true;
+        const bool sticky = frac != 0;
+        if (sf64_internal_should_round_up(sign, round_bit, sticky, /*lsb=*/false, mode)) {
+            return 1u;
+        }
+        return 0;
+    }
+
     if (e > 63) {
+        // Finite value larger than any representable integer in the target
+        // range: invalid (per IEEE 754 §7.2 the saturating-convert path
+        // signals INVALID; the callers replace the returned magnitude with
+        // the type's saturation value).
+        SF64_FE_RAISE(SF64_FE_INVALID);
         *too_large = true;
         return ~uint64_t{0};
     }
     if (e >= kFracBits) {
+        // Exact (no fraction bits dropped).
         const int shift = e - kFracBits; // in [0, 11]
         return mant << shift;
     }
-    // e in [0, 51] — shift right, discarding fraction bits.
+
+    // e in [0, 51] — some fraction bits are dropped.
     const int shift = kFracBits - e; // in [1, 52]
-    return mant >> shift;
+    const uint64_t trunc = mant >> shift;
+    const uint64_t round_pos = uint64_t{1} << (shift - 1);
+    const bool round_bit = (mant & round_pos) != 0;
+    const bool sticky = shift >= 2 && (mant & (round_pos - 1u)) != 0;
+    const bool lsb = (trunc & 1u) != 0;
+    if (round_bit || sticky) {
+        SF64_FE_RAISE(SF64_FE_INEXACT);
+    }
+    uint64_t rounded = trunc;
+    if (sf64_internal_should_round_up(sign, round_bit, sticky, lsb, mode)) {
+        rounded += 1u;
+        if (rounded == 0) {
+            // Carry past the 64-bit boundary → invalid.
+            SF64_FE_RAISE(SF64_FE_INVALID);
+            *too_large = true;
+            return ~uint64_t{0};
+        }
+    }
+    return rounded;
 }
 
 // ---- f64 -> signed integer, saturating to [type_min, type_max] ----------
 //
 // `imin`/`imax` are the destination type bounds as signed 64-bit values.
-SF64_ALWAYS_INLINE int64_t fp64_to_signed(double x, int64_t imin, int64_t imax) noexcept {
+SF64_ALWAYS_INLINE int64_t fp64_to_signed(double x, int64_t imin, int64_t imax,
+                                          sf64_rounding_mode mode) noexcept {
     const uint64_t b = bits_of(x);
     const uint32_t sign = extract_sign(b);
 
     bool too_large = false;
     bool is_nan = false;
-    const uint64_t mag = fp64_to_u64_magnitude(x, &too_large, &is_nan);
+    const uint64_t mag = fp64_to_u64_magnitude(x, sign, mode, &too_large, &is_nan);
 
     if (is_nan)
         return 0;
@@ -207,8 +255,11 @@ SF64_ALWAYS_INLINE int64_t fp64_to_signed(double x, int64_t imin, int64_t imax) 
         } else {
             neg_cap = static_cast<uint64_t>(-imin);
         }
-        if (mag > neg_cap)
+        if (mag > neg_cap) {
+            // Saturation past the signed destination floor → invalid.
+            SF64_FE_RAISE(SF64_FE_INVALID);
             return imin;
+        }
         // Now -mag is representable as int64_t (or equals INT64_MIN for mag == 2^63).
         if (mag == (uint64_t{1} << 63)) {
             // -(2^63) = INT64_MIN; wider types also accept this.
@@ -219,36 +270,42 @@ SF64_ALWAYS_INLINE int64_t fp64_to_signed(double x, int64_t imin, int64_t imax) 
 
     // Positive: value is +mag. Saturate against imax (>= 0).
     const uint64_t pos_cap = static_cast<uint64_t>(imax);
-    if (mag > pos_cap)
+    if (mag > pos_cap) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
         return imax;
+    }
     return static_cast<int64_t>(mag);
 }
 
 // ---- f64 -> unsigned integer, saturating to [0, type_max] ---------------
-SF64_ALWAYS_INLINE uint64_t fp64_to_unsigned(double x, uint64_t umax) noexcept {
+SF64_ALWAYS_INLINE uint64_t fp64_to_unsigned(double x, uint64_t umax,
+                                             sf64_rounding_mode mode) noexcept {
     const uint64_t b = bits_of(x);
     const uint32_t sign = extract_sign(b);
 
     bool too_large = false;
     bool is_nan = false;
-    const uint64_t mag = fp64_to_u64_magnitude(x, &too_large, &is_nan);
+    const uint64_t mag = fp64_to_u64_magnitude(x, sign, mode, &too_large, &is_nan);
 
     if (is_nan)
         return 0;
 
     if (sign) {
         // Any negative (including -inf) saturates to 0 (the minimum of an
-        // unsigned destination).
-        //
-        // Exception: negative values with |x| < 1 also saturate to 0 — same
-        // result, falls through below since mag == 0.
+        // unsigned destination). A negative value that rounded to a
+        // non-zero magnitude is out-of-range for the unsigned type → INVALID.
+        if (mag != 0) {
+            SF64_FE_RAISE(SF64_FE_INVALID);
+        }
         return 0;
     }
 
     if (too_large)
         return umax;
-    if (mag > umax)
+    if (mag > umax) {
+        SF64_FE_RAISE(SF64_FE_INVALID);
         return umax;
+    }
     return mag;
 }
 
@@ -311,7 +368,28 @@ extern "C" double sf64_from_f32(float x) {
     return from_bits(pack(sign, f64_exp, f64_frac));
 }
 
-extern "C" float sf64_to_f32(double x) {
+namespace {
+
+// Directed-mode overflow in f32: RTZ → max-finite; RUP → +inf / max-finite
+// (neg); RDN → -inf / max-finite (pos); RNE/RNA → ±inf.
+SF64_ALWAYS_INLINE uint32_t f32_overflow_bits(uint32_t sign, sf64_rounding_mode mode) noexcept {
+    constexpr uint32_t kF32MaxFinite = 0x7F7FFFFFu;
+    const uint32_t inf_bits = (sign << 31) | (0xFFu << 23);
+    switch (mode) {
+    case SF64_RTZ:
+        return (sign << 31) | kF32MaxFinite;
+    case SF64_RUP:
+        return sign == 0u ? inf_bits : (0x80000000u | kF32MaxFinite);
+    case SF64_RDN:
+        return sign != 0u ? inf_bits : kF32MaxFinite;
+    case SF64_RNE:
+    case SF64_RNA:
+    default:
+        return inf_bits;
+    }
+}
+
+SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept {
     const uint64_t b = bits_of(x);
     const uint32_t sign = extract_sign(b);
     const uint32_t exp64 = extract_exp(b);
@@ -319,114 +397,134 @@ extern "C" float sf64_to_f32(double x) {
 
     if (exp64 == kExpMax) {
         if (frac64 == 0) {
-            // inf
             const uint32_t out = (sign << 31) | (0xFFu << 23);
-            // SAFETY: bit-pattern construction; bit_cast to float is pure type pun.
             return __builtin_bit_cast(float, out);
         }
-        // NaN — propagate high payload bits, force quiet bit (bit 22 of f32).
         const uint32_t payload = static_cast<uint32_t>(frac64 >> 29) & 0x7FFFFFu;
         const uint32_t out = (sign << 31) | (0xFFu << 23) | payload | 0x400000u;
-        // SAFETY: NaN bit pattern; bit_cast is a type pun, not arithmetic.
         return __builtin_bit_cast(float, out);
     }
 
     if (exp64 == 0) {
         // Zero or f64 subnormal — all f64 subnormals are well below f32's
-        // smallest subnormal, so they flush to +/-0 in f32.
+        // smallest subnormal, so they flush to +/-0 under RNE/RTZ/RNA. RUP
+        // of a tiny positive rounds up to denorm_min; RDN of a tiny negative
+        // rounds down to -denorm_min.
+        if (frac64 == 0) {
+            const uint32_t out = sign << 31;
+            return __builtin_bit_cast(float, out);
+        }
+        // Non-zero f64 subnormal collapsing to an f32 zero or denorm_min
+        // is tiny + inexact → UNDERFLOW + INEXACT.
+        SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+        if ((mode == SF64_RUP && sign == 0u) || (mode == SF64_RDN && sign != 0u)) {
+            const uint32_t out = (sign << 31) | 1u;
+            return __builtin_bit_cast(float, out);
+        }
         const uint32_t out = sign << 31;
-        // SAFETY: signed zero bit pattern.
         return __builtin_bit_cast(float, out);
     }
 
-    // Normal f64. Rebase exponent: f64_exp - 1023 + 127 = f64_exp - 896.
     const int unbiased = static_cast<int>(exp64) - kExpBias;
     const int new_exp = unbiased + 127;
 
     if (new_exp >= 0xFF) {
-        // Overflow -> +/- inf.
-        const uint32_t out = (sign << 31) | (0xFFu << 23);
-        // SAFETY: infinity bit pattern.
-        return __builtin_bit_cast(float, out);
+        SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+        return __builtin_bit_cast(float, f32_overflow_bits(sign, mode));
     }
 
-    // Mantissa with implicit bit (53 bits, MSB at 52).
     const uint64_t mant = frac64 | kImplicitBit;
 
     if (new_exp > 0) {
-        // Normal f32 result. Keep top 24 bits (implicit + 23), round the
-        // remaining 29 via round-to-nearest-even.
-        const uint64_t guard_bit = uint64_t{1} << 28;
-        const uint64_t round_mask = (uint64_t{1} << 29) - 1u;
-        const uint64_t top24 = mant >> 29;          // 24 bits: implicit + 23 frac
-        const uint64_t dropped = mant & round_mask; // 29 bits
+        const uint64_t round_pos = uint64_t{1} << 28;
+        const uint64_t top24 = mant >> 29;
+        const bool round_bit = (mant & round_pos) != 0;
+        const bool sticky = (mant & (round_pos - 1u)) != 0;
+        const bool lsb = (top24 & 1u) != 0;
 
         uint64_t rounded = top24;
-        if (dropped > guard_bit || (dropped == guard_bit && (top24 & 1u))) {
+        if (sf64_internal_should_round_up(sign, round_bit, sticky, lsb, mode)) {
             rounded += 1u;
         }
 
         uint32_t exp_out = static_cast<uint32_t>(new_exp);
         uint32_t frac_out;
         if (rounded & (uint64_t{1} << 24)) {
-            // Mantissa overflowed past 24 bits -> exponent bump.
             exp_out += 1u;
             if (exp_out >= 0xFFu) {
-                // Round-to-inf.
-                const uint32_t inf_bits = (sign << 31) | (0xFFu << 23);
-                // SAFETY: infinity bit pattern.
-                return __builtin_bit_cast(float, inf_bits);
+                SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+                return __builtin_bit_cast(float, f32_overflow_bits(sign, mode));
             }
-            frac_out = 0; // rounded == 0x1000000; implicit bit shifts up.
+            frac_out = 0;
         } else {
             frac_out = static_cast<uint32_t>(rounded) & 0x7FFFFFu;
         }
+        if (round_bit || sticky) {
+            SF64_FE_RAISE(SF64_FE_INEXACT);
+        }
         const uint32_t out = (sign << 31) | (exp_out << 23) | frac_out;
-        // SAFETY: assembled f32 bit pattern from components.
         return __builtin_bit_cast(float, out);
     }
 
-    // new_exp <= 0 — subnormal or underflow. The true exponent is
-    // (new_exp - 127) relative to f32; we need to produce a f32 subnormal
-    // whose implicit bit is encoded as a shifted fraction with exp_field=0.
-    //
-    // Total right-shift from the 53-bit mant to the 23-bit subnormal frac:
-    //   normal case: 29 (drop 29 low bits)
-    //   each step new_exp < 1 costs another bit of shift
-    //   shift = 29 + (1 - new_exp) = 30 - new_exp
+    // new_exp <= 0 — subnormal or underflow.
     const int shift = 30 - new_exp;
 
     if (shift > 53) {
-        // Entire 53-bit mantissa sits strictly below the guard position
-        // (at bit shift-1 ≥ 53). Value magnitude is < denorm_min/2, so
-        // round-to-nearest-even sends it to ±0. Also avoids the UB that
-        // `uint64_t{1} << shift` triggers when shift ≥ 64.
+        // Entire 53-bit mantissa sits strictly below the guard position;
+        // value magnitude is < denorm_min/2. RNE/RTZ/RNA → ±0; RUP/RDN of
+        // the appropriate sign bump to ±denorm_min.
+        if (mant == 0) {
+            const uint32_t out = sign << 31;
+            return __builtin_bit_cast(float, out);
+        }
+        // Tiny input lost entirely → UNDERFLOW + INEXACT.
+        SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+        if ((mode == SF64_RUP && sign == 0u) || (mode == SF64_RDN && sign != 0u)) {
+            const uint32_t out = (sign << 31) | 1u;
+            return __builtin_bit_cast(float, out);
+        }
         const uint32_t out = sign << 31;
-        // SAFETY: signed-zero bit pattern.
         return __builtin_bit_cast(float, out);
     }
 
-    const uint64_t guard_bit = uint64_t{1} << (shift - 1);
-    const uint64_t round_mask = (uint64_t{1} << shift) - 1u;
+    const uint64_t round_pos = uint64_t{1} << (shift - 1);
     const uint64_t top = mant >> shift;
-    const uint64_t dropped = mant & round_mask;
+    const bool round_bit = (mant & round_pos) != 0;
+    const bool sticky = shift >= 2 && (mant & (round_pos - 1u)) != 0;
+    const bool lsb = (top & 1u) != 0;
 
     uint64_t rounded = top;
-    if (dropped > guard_bit || (dropped == guard_bit && (top & 1u))) {
+    if (sf64_internal_should_round_up(sign, round_bit, sticky, lsb, mode)) {
         rounded += 1u;
+    }
+
+    // f32 output path is always tiny-before-rounding (we're in the
+    // new_exp<=0 branch), so any rounding loss is UNDERFLOW + INEXACT. The
+    // "rounded into smallest normal" branch still counts — IEEE 754 §7.5
+    // treats it as an underflow signalling event.
+    if (round_bit || sticky) {
+        SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
     }
 
     if (rounded & (uint64_t{1} << 23)) {
         // Rounded up past subnormal range -> smallest normal.
         const uint32_t out = (sign << 31) | (1u << 23);
-        // SAFETY: f32 smallest-normal bit pattern.
         return __builtin_bit_cast(float, out);
     }
 
     const uint32_t frac_out = static_cast<uint32_t>(rounded) & 0x7FFFFFu;
     const uint32_t out = (sign << 31) | frac_out;
-    // SAFETY: f32 subnormal bit pattern.
     return __builtin_bit_cast(float, out);
+}
+
+} // namespace
+
+extern "C" float sf64_to_f32(double x) {
+    return to_f32_impl(x, SF64_RNE);
+}
+
+extern "C" float sf64_to_f32_r(sf64_rounding_mode mode, double x) {
+    return to_f32_impl(x, mode);
 }
 
 // -------------------------------------------------------------------------
@@ -434,29 +532,29 @@ extern "C" float sf64_to_f32(double x) {
 // -------------------------------------------------------------------------
 
 extern "C" double sf64_from_i8(int8_t x) {
-    return i64_to_fp64(static_cast<int64_t>(x));
+    return i64_to_fp64(static_cast<int64_t>(x), SF64_RNE);
 }
 extern "C" double sf64_from_i16(int16_t x) {
-    return i64_to_fp64(static_cast<int64_t>(x));
+    return i64_to_fp64(static_cast<int64_t>(x), SF64_RNE);
 }
 extern "C" double sf64_from_i32(int32_t x) {
-    return i64_to_fp64(static_cast<int64_t>(x));
+    return i64_to_fp64(static_cast<int64_t>(x), SF64_RNE);
 }
 extern "C" double sf64_from_i64(int64_t x) {
-    return i64_to_fp64(x);
+    return i64_to_fp64(x, SF64_RNE);
 }
 
 extern "C" double sf64_from_u8(uint8_t x) {
-    return u64_to_fp64(static_cast<uint64_t>(x));
+    return u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE);
 }
 extern "C" double sf64_from_u16(uint16_t x) {
-    return u64_to_fp64(static_cast<uint64_t>(x));
+    return u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE);
 }
 extern "C" double sf64_from_u32(uint32_t x) {
-    return u64_to_fp64(static_cast<uint64_t>(x));
+    return u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE);
 }
 extern "C" double sf64_from_u64(uint64_t x) {
-    return u64_to_fp64(x);
+    return u64_to_fp64(x, SF64_RNE);
 }
 
 // -------------------------------------------------------------------------
@@ -464,27 +562,53 @@ extern "C" double sf64_from_u64(uint64_t x) {
 // -------------------------------------------------------------------------
 
 extern "C" int8_t sf64_to_i8(double x) {
-    return static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX));
+    return static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX, SF64_RTZ));
 }
 extern "C" int16_t sf64_to_i16(double x) {
-    return static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX));
+    return static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX, SF64_RTZ));
 }
 extern "C" int32_t sf64_to_i32(double x) {
-    return static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX));
+    return static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX, SF64_RTZ));
 }
 extern "C" int64_t sf64_to_i64(double x) {
-    return fp64_to_signed(x, INT64_MIN, INT64_MAX);
+    return fp64_to_signed(x, INT64_MIN, INT64_MAX, SF64_RTZ);
 }
 
 extern "C" uint8_t sf64_to_u8(double x) {
-    return static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX));
+    return static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX, SF64_RTZ));
 }
 extern "C" uint16_t sf64_to_u16(double x) {
-    return static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX));
+    return static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX, SF64_RTZ));
 }
 extern "C" uint32_t sf64_to_u32(double x) {
-    return static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX));
+    return static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX, SF64_RTZ));
 }
 extern "C" uint64_t sf64_to_u64(double x) {
-    return fp64_to_unsigned(x, UINT64_MAX);
+    return fp64_to_unsigned(x, UINT64_MAX, SF64_RTZ);
+}
+
+extern "C" int8_t sf64_to_i8_r(sf64_rounding_mode mode, double x) {
+    return static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX, mode));
+}
+extern "C" int16_t sf64_to_i16_r(sf64_rounding_mode mode, double x) {
+    return static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX, mode));
+}
+extern "C" int32_t sf64_to_i32_r(sf64_rounding_mode mode, double x) {
+    return static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX, mode));
+}
+extern "C" int64_t sf64_to_i64_r(sf64_rounding_mode mode, double x) {
+    return fp64_to_signed(x, INT64_MIN, INT64_MAX, mode);
+}
+
+extern "C" uint8_t sf64_to_u8_r(sf64_rounding_mode mode, double x) {
+    return static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX, mode));
+}
+extern "C" uint16_t sf64_to_u16_r(sf64_rounding_mode mode, double x) {
+    return static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX, mode));
+}
+extern "C" uint32_t sf64_to_u32_r(sf64_rounding_mode mode, double x) {
+    return static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX, mode));
+}
+extern "C" uint64_t sf64_to_u64_r(sf64_rounding_mode mode, double x) {
+    return fp64_to_unsigned(x, UINT64_MAX, mode);
 }

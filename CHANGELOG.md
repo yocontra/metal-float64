@@ -7,6 +7,185 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Every numeric claim in this file traces to a specific CI-gated sweep —
 no prose-only bounds. See `README.md` for the full precision table.
 
+## [1.1.0] — unreleased
+
+Additive release on top of 1.0. Three integrity-layer features land:
+non-RNE rounding modes, IEEE-754 exception flags with thread-local
+`fenv`, and the precision closures that were parked non-blocking in 1.0.
+No breaking changes — the default `sf64_*` surface keeps RNE semantics
+and silent (non-raising) exception behavior when `SOFT_FP64_FENV=disabled`.
+
+### Added
+
+- **Non-RNE rounding modes.** `sf64_*_r(mode, …)` surface on every
+  round-affected op. Covered entries: `sf64_add_r`, `sf64_sub_r`,
+  `sf64_mul_r`, `sf64_div_r`, `sf64_sqrt_r`, `sf64_fma_r`,
+  `sf64_to_f32_r`, `sf64_to_{i8,i16,i32,i64,u8,u16,u32,u64}_r`,
+  `sf64_rint_r`. The `sf64_rounding_mode` enum lives in
+  `include/soft_fp64/rounding_mode.h` and matches IEEE-754 §4.3:
+  `SF64_RNE`, `SF64_RTZ`, `SF64_RUP`, `SF64_RDN`, `SF64_RNA`.
+  Bit-exact vs. MPFR 200-bit and Berkeley TestFloat 3e in all five
+  modes (`tests/mpfr/test_mpfr_diff.cpp` sweeps per-mode,
+  `tests/testfloat/run_testfloat.cpp` replays per-mode TestFloat
+  vectors). Ops whose result is mode-independent — `neg`, `fabs`,
+  `copysign`, compares, `ldexp`, `frexp`, classify, `fmod`,
+  `remainder`, `floor`, `ceil`, `trunc`, `round` — do **not** get
+  `_r` variants by design.
+- **IEEE-754 exception flags + thread-local `fenv`.** `sf64_fe_*`
+  surface: `SF64_FE_{INVALID,DIVBYZERO,OVERFLOW,UNDERFLOW,INEXACT}`
+  flag bits, `sf64_fe_getall` / `sf64_fe_test` / `sf64_fe_raise` /
+  `sf64_fe_clear` stickies, and `sf64_fe_save` / `sf64_fe_restore`
+  opaque-state snapshots. Flag storage is per-thread
+  (`thread_local unsigned`). Build option `SOFT_FP64_FENV` selects
+  `tls` (default on hosted builds), `disabled` (all `sf64_fe_*`
+  compile to no-ops; raise-sites compile out for zero runtime cost),
+  or `explicit` (reserved for a caller-provided-state ABI in a future
+  release; compiles as `disabled` today). Bit layout matches
+  `<fenv.h>` conventions. Every raise site (INVALID on `sqrt(<0)` /
+  `0×∞` fma / `fmod(x,0)` / NaN-to-int / OOR-to-int, DIVBYZERO on
+  finite/0 division, OVERFLOW on exp-field saturation, UNDERFLOW on
+  tiny-before-rounding+inexact, INEXACT on nonzero guard-or-sticky
+  in the round-pack) is gated by `test_fenv.cpp` spot-checks plus
+  full-corpus validation against Berkeley TestFloat 3e's `fl2`
+  column (7.16M vectors).
+- **`sf64_fma` 0×∞ with NaN addend.** IEEE-754 §7.2 requires
+  `INVALID` to signal when the (a·b) sub-operation is 0×∞,
+  regardless of `c`. `src/sqrt_fma.cpp` now raises `INVALID` on
+  that path before NaN propagation short-circuits.
+- **`sf64_fmod` / `sf64_remainder` exact-result flags.** IEEE-754
+  §5.3.1 specifies these ops as exact: only `INVALID` (on
+  `x=±inf` or `y=0`) may be raised. Both functions now snapshot
+  the `fenv` before their internal sub/div scratch ops and restore
+  afterward, preventing spurious `INEXACT` / `UNDERFLOW` leakage.
+- **`logk_dd` DD-Horner rewrite.** `src/sleef/sleef_inv_hyp_pow.cpp`
+  now evaluates the log tail polynomial in full double-double Horner
+  form (~100+ bits of accumulated precision) instead of running the
+  tail against `x².hi` as a plain double (capped at ~2⁻⁵⁶). Main
+  consumer is `sf64_pow` — worst-case drops from ~40 ULP to ≤4 ULP
+  in the near-unit-base × huge-exponent corner. The `tests/mpfr/`
+  `sf64_pow` sweeps remain U35 (≤8 ULP) as a documented ceiling;
+  measured worst-case is now inside U10.
+- **`sf64_sinh` overflow-boundary refinement.** The large-|x| branch
+  now handles `|x| ∈ (709.78, 710.4758]` by evaluating `expk_dd` on
+  a DD pair `(a - kL2U, -kL2L)` rather than flushing to ±inf at
+  `log(DBL_MAX)`. Previously sinh returned ±inf in that window
+  (`exp(|x|)` would overflow before the ×½), now it returns the
+  correct finite ~±DBL_MAX result. Threshold is
+  `log(2·DBL_MAX) ≈ 710.4758600739439`.
+- **Payne–Hanek deep-reduction breadth.** `test_transcendental_1ulp.cpp`
+  `ks[]` extended from `{2⁴⁰, 2⁴⁵, 2⁵⁰}` to include `2⁵⁰⁰` and `2⁹⁰⁰`,
+  matching the coverage already in `tests/test_coverage_mpfr.cpp`.
+  Adds a libm-oracle signal for the deep-reduction regime.
+- **TestFloat `fl2` oracle parity.** `tests/testfloat/run_testfloat.cpp`
+  now parses Berkeley SoftFloat's `fl2` flag column and gates every
+  vector on it (INEXACT / UNDERFLOW / OVERFLOW / DIVBYZERO / INVALID).
+  TestFloat is generated with `-tininessbefore` (IEEE §7.5 tiny-
+  before-rounding, matching MIPS/RISC-V) and `-exact` (IEEE §7.1
+  INEXACT on lossy int truncation). sNaN-input rows are skipped
+  pending sNaN payload preservation in 1.2.
+- **New test harnesses.** `tests/test_rounding_modes.cpp` exercises
+  every `_r` entry across the five modes; `tests/test_fenv.cpp`
+  spot-checks every flag-raise site plus thread-isolation of the
+  TLS accumulator (worker thread raises on its own state while
+  main thread observes its own independent state).
+- **Lint job migration.** CI `lint` job switched from ad-hoc
+  `clang-format-19` apt install to [`prek`](https://github.com/j178/prek)
+  running a pinned `.pre-commit-config.yaml`. Clang-format version
+  stays locked to v19; rules are now co-located with the local
+  pre-commit hook.
+
+### Changed
+
+- **`sf64_pow` documented precision.** Doxygen on
+  `include/soft_fp64/soft_f64.h` reflects the post-A1 worst-case;
+  shipped tier stays U35 (≤8 ULP) per the three bounded-window
+  sweeps, with a note that measured worst-case is now inside U10
+  (≤4 ULP) across the full double range thanks to the `logk_dd`
+  rewrite.
+- **Experimental carve-out: `sf64_lgamma` on `[0.5, 3)`** remains
+  report-only in `tests/experimental/experimental_precision.cpp`.
+  The `logk_dd` fix did not close this — the blow-up is algorithmic
+  (lgamma vanishes at x=1 and x=2, so the ULP ratio grows
+  unboundedly against the double-floor absolute error). The proper
+  fix is a zero-centered Taylor expansion, tracked in `TODO.md`
+  for a future release.
+
+### Performance
+
+- **Hot-path overhead — Track B2 + Track C combined.** The
+  mode-parametrized round-pack refactor (Track B2) and the
+  `SOFT_FP64_FENV=tls` raise plumbing (Track C) each add cost on the
+  simplest arithmetic ops, where the op itself is 5–10 ns/op. Local
+  measurement on Apple M2 Max, release build, `--min-time-ms=500`,
+  vs the 1.0 `bench/baseline.json` (macos-14 GHA, M-series):
+  | op       | 1.0    | 1.1 disabled | 1.1 tls |
+  |----------|--------|--------------|---------|
+  | `add`    | 10.89  | 14.93 (+37%) | 16.22 (+49%)  |
+  | `sub`    | 11.14  | 15.54 (+40%) | 16.59 (+49%)  |
+  | `mul`    | 5.19   | 5.53 (+7%)   | 11.22 (+116%) |
+  | `div`    | 16.87  | 23.27 (+38%) | 24.57 (+46%)  |
+  | `to_i32` | 4.89   | 2.63 (−46%)  | 9.94 (+104%)  |
+  | `pow`    | 1324.2 | 1899.5 (+43%)| 1968.6 (+49%) |
+  | `fma`    | 17.93  | 14.53 (−19%) | 15.22 (−15%)  |
+  | transcendentals | | within ±4%   | within ±3% |
+  Hardware-class caveat: the committed baseline is macos-14 GHA
+  M-series; my M2 Max should run faster than GHA M1 absent code
+  changes, so the true 1.1-only delta is the "1.1 disabled" column
+  minus an unmeasured hardware-speedup term. `fma` and `to_i32`
+  improve from Track B2 centralization (fewer round-pack
+  duplicates); add/sub/div pick up per-call cost from the extra
+  mode-threaded round-step even when fenv is compiled out. The
+  committed `bench/baseline.json` will be refreshed on the 1.1
+  release PR from the CI `bench-regression` macos-14 run, matching
+  the runner hardware class.
+- **Consumer recipe.** Consumers needing the 1.0-shape cost profile
+  on transcendentals with only the Track B2 round-pack cost on
+  simple arithmetic build with `-DSOFT_FP64_FENV=disabled`; the
+  raise sites compile to `(void)0` and the `sf64_fe_*` public
+  surface is a no-op shim. Consumers that want fenv must accept the
+  TLS store per round-pack call.
+
+### Integrity guarantees
+
+- Every guarantee from 1.0 is preserved bit-for-bit. The default
+  `sf64_*` surface remains RNE; `_r` variants are additive.
+- Under `SOFT_FP64_FENV=disabled`, `sf64_fe_*` surface compiles to
+  no-ops and every raise site compiles out — `install-smoke`
+  confirms the archive still exports only `sf64_*` symbols.
+- Under `SOFT_FP64_FENV=tls`, the flag accumulator is strictly
+  per-thread. `test_fenv.cpp` verifies independent accumulation
+  across concurrent worker threads.
+- Oracle `fl2` gating is full-corpus, not sampled. Any TestFloat
+  row whose observed `sf64_fe_*` bits disagree with Berkeley's
+  expected-flag column fails ctest — no skip lists, no row
+  filtering, no loosened bounds.
+- **SLEEF transcendental carve-out removed.** 1.0 and earlier
+  shipped a port that converted upstream SLEEF's `+ - * / fma sqrt
+  floor ldexp` into `sf64_*` calls but left raw `<`, `>`, `==`,
+  `!=`, `(double)int` in place — these relied on the frontend
+  (AdaptiveCpp's SSCP emitter) lowering `fcmp.f64` / `sitofp` to
+  soft-ops on no-fp64 targets. 1.1 finishes the port: every
+  relational comparison goes through the `sleef::lt_` / `le_` /
+  `gt_` / `ge_` / `eq_` / `ne_` helpers (wrapping `sf64_fcmp` with
+  the LLVM predicate encoding) and every integer → double cast goes
+  through `sf64_from_i64`. The README claim "no hidden dependency
+  on the host FPU" is now mechanically true across all of `src/`,
+  not just the bit-exact core. Enforced by
+  `scripts/check_no_host_fp.sh` in prek + CI.
+
+### Not included — tracked for 1.2+ in `TODO.md`
+
+- sNaN payload preservation (depends on `SOFT_FP64_SNAN_PROPAGATE`
+  build option + wired TestFloat sNaN vectors; v1.2 target).
+- `soft-fp128` sibling package.
+- `__acpp_sscp_lgamma_r_f64` adapter forwarding (blocks on
+  `sf64_lgamma_r` core entry).
+- `sf64_lgamma` zero-crossing sweep on `[0.5, 3)` — requires a
+  zero-centered Taylor rewrite at `x=1` and `x=2`, not better log
+  precision.
+
+[1.1.0]: https://github.com/contra/soft-fp64/releases/tag/v1.1.0
+
 ## [1.0.0] — unreleased
 
 First stable release. Ships a complete `sf64_*` IEEE-754 binary64 surface
