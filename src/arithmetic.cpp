@@ -45,8 +45,11 @@ namespace {
 // Mode-aware round-and-pack. `exp` is the biased target exponent corresponding
 // to the implicit bit sitting at bit 61 of `sig`; `mode` selects the rounding
 // attribute (SF64_RNE reproduces the original pre-1.1 behaviour bit-exactly).
+// `fe` is the caller's stack-local flag accumulator — we raise into it and the
+// caller flushes once to TLS at end of the public op (see internal_fenv.h).
 SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, int32_t exp, uint64_t sig,
-                                         sf64_rounding_mode mode) noexcept {
+                                         sf64_rounding_mode mode,
+                                         sf64_internal_fe_acc& fe) noexcept {
     auto overflow_result = [](uint32_t s, sf64_rounding_mode m) -> double {
         // Directed modes: RTZ always returns max-finite; RUP returns +inf
         // for positive / max-finite for negative; RDN is the mirror.
@@ -68,7 +71,7 @@ SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, int32_t exp, uint64_t si
     };
 
     if (exp >= 0x7FF) {
-        SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+        fe.raise(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
         return overflow_result(sign, mode);
     }
 
@@ -99,7 +102,7 @@ SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, int32_t exp, uint64_t si
         rounded = shift_right_jamming(rounded, 1);
         ++exp;
         if (exp >= 0x7FF) {
-            SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+            fe.raise(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
             return overflow_result(sign, mode);
         }
     }
@@ -132,9 +135,9 @@ SF64_ALWAYS_INLINE double round_and_pack(uint32_t sign, int32_t exp, uint64_t si
     // still comes from the guard/sticky of the rounded tail.
     if (inexact) {
         if (was_tiny_before_rounding) {
-            SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+            fe.raise(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
         } else {
-            SF64_FE_RAISE(SF64_FE_INEXACT);
+            fe.raise(SF64_FE_INEXACT);
         }
     }
 
@@ -201,7 +204,8 @@ SF64_ALWAYS_INLINE Unpacked unpack_finite_nonzero(uint64_t bits) noexcept {
 
 // Add two significands that share the same sign.
 SF64_ALWAYS_INLINE double add_magnitudes(uint32_t sign, uint64_t a_bits, uint64_t b_bits,
-                                         sf64_rounding_mode mode) noexcept {
+                                         sf64_rounding_mode mode,
+                                         sf64_internal_fe_acc& fe) noexcept {
     const Unpacked a = unpack_finite_nonzero(a_bits);
     const Unpacked b = unpack_finite_nonzero(b_bits);
 
@@ -231,7 +235,7 @@ SF64_ALWAYS_INLINE double add_magnitudes(uint32_t sign, uint64_t a_bits, uint64_
         ++exp;
     }
 
-    return round_and_pack(sign, exp, sum, mode);
+    return round_and_pack(sign, exp, sum, mode, fe);
 }
 
 // Subtract magnitudes. `a_bits` and `b_bits` are finite, non-zero. The sign
@@ -240,7 +244,8 @@ SF64_ALWAYS_INLINE double add_magnitudes(uint32_t sign, uint64_t a_bits, uint64_
 // (IEEE 754-2008 §6.3: exact cancellation produces -0 only for RDN);
 // callers pass the "preferred zero sign" for RDN via `zero_sign`.
 SF64_ALWAYS_INLINE double sub_magnitudes(uint32_t a_sign, uint64_t a_bits, uint64_t b_bits,
-                                         uint32_t zero_sign, sf64_rounding_mode mode) noexcept {
+                                         uint32_t zero_sign, sf64_rounding_mode mode,
+                                         sf64_internal_fe_acc& fe) noexcept {
     const Unpacked a = unpack_finite_nonzero(a_bits);
     const Unpacked b = unpack_finite_nonzero(b_bits);
 
@@ -294,12 +299,12 @@ SF64_ALWAYS_INLINE double sub_magnitudes(uint32_t a_sign, uint64_t a_bits, uint6
     diff <<= norm_shift;
     exp -= norm_shift;
 
-    return round_and_pack(sign, exp, diff, mode);
+    return round_and_pack(sign, exp, diff, mode, fe);
 }
 
 // Core multiplication body — finite, non-zero operands. Mode-parametrized.
 SF64_ALWAYS_INLINE double mul_impl(uint64_t ab, uint64_t bb, uint32_t r_sign,
-                                   sf64_rounding_mode mode) noexcept {
+                                   sf64_rounding_mode mode, sf64_internal_fe_acc& fe) noexcept {
     // Unpack magnitudes. Significand sits at bit 52 with implicit bit.
     int32_t exp_a, exp_b;
     uint64_t sig_a, sig_b;
@@ -337,12 +342,12 @@ SF64_ALWAYS_INLINE double mul_impl(uint64_t ab, uint64_t bb, uint32_t r_sign,
             sig |= 1ULL;
     }
 
-    return round_and_pack(r_sign, exp_r, sig, mode);
+    return round_and_pack(r_sign, exp_r, sig, mode, fe);
 }
 
 // Core division body — finite, non-zero operands. Mode-parametrized.
 SF64_ALWAYS_INLINE double div_impl(uint64_t ab, uint64_t bb, uint32_t r_sign,
-                                   sf64_rounding_mode mode) noexcept {
+                                   sf64_rounding_mode mode, sf64_internal_fe_acc& fe) noexcept {
     const Unpacked ua = unpack_finite_nonzero(ab);
     const Unpacked ub = unpack_finite_nonzero(bb);
     uint64_t sig_a = ua.sig >> 9;
@@ -370,7 +375,7 @@ SF64_ALWAYS_INLINE double div_impl(uint64_t ab, uint64_t bb, uint32_t r_sign,
         ++exp_r;
     }
 
-    return round_and_pack(r_sign, exp_r, sig, mode);
+    return round_and_pack(r_sign, exp_r, sig, mode, fe);
 }
 
 } // unnamed namespace
@@ -382,8 +387,11 @@ extern "C" double sf64_neg(double a) {
     return from_bits(bits_of(a) ^ kSignMask);
 }
 
-// Mode-parametrized add. Public SF64_RNE path wraps this.
-static SF64_ALWAYS_INLINE double add_r_impl(double a, double b, sf64_rounding_mode mode) noexcept {
+// Mode-parametrized add. Public SF64_RNE path wraps this. `fe` is the
+// caller's stack-local flag accumulator — inf-inf INVALID and every raise
+// from round_and_pack feeds into it; caller flushes once to TLS at return.
+static SF64_ALWAYS_INLINE double add_r_impl(double a, double b, sf64_rounding_mode mode,
+                                            sf64_internal_fe_acc& fe) noexcept {
     const uint64_t ab = bits_of(a);
     const uint64_t bb = bits_of(b);
     const uint32_t a_exp = extract_exp(ab);
@@ -405,7 +413,7 @@ static SF64_ALWAYS_INLINE double add_r_impl(double a, double b, sf64_rounding_mo
             if (a_sign == b_sign)
                 return make_signed_inf(a_sign);
             // inf + (-inf) or (-inf) + inf: invalid.
-            SF64_FE_RAISE(SF64_FE_INVALID);
+            fe.raise(SF64_FE_INVALID);
             return canonical_nan();
         }
         return a_inf ? make_signed_inf(a_sign) : make_signed_inf(b_sign);
@@ -427,31 +435,44 @@ static SF64_ALWAYS_INLINE double add_r_impl(double a, double b, sf64_rounding_mo
 
     // Both finite, non-zero.
     if (a_sign == b_sign) {
-        return add_magnitudes(a_sign, ab, bb, mode);
+        return add_magnitudes(a_sign, ab, bb, mode, fe);
     }
     // Differing signs → subtraction. Preferred zero sign for exact
     // cancellation is +0 under RNE/RTZ/RUP/RNA and -0 under RDN.
     const uint32_t zero_sign = (mode == SF64_RDN) ? 1u : 0u;
-    return sub_magnitudes(a_sign, ab, bb, zero_sign, mode);
+    return sub_magnitudes(a_sign, ab, bb, zero_sign, mode, fe);
 }
 
 extern "C" double sf64_add(double a, double b) {
-    return add_r_impl(a, b, SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = add_r_impl(a, b, SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" double sf64_add_r(sf64_rounding_mode mode, double a, double b) {
-    return add_r_impl(a, b, mode);
+    sf64_internal_fe_acc fe;
+    const double r = add_r_impl(a, b, mode, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" double sf64_sub(double a, double b) {
-    return add_r_impl(a, sf64_neg(b), SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = add_r_impl(a, sf64_neg(b), SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" double sf64_sub_r(sf64_rounding_mode mode, double a, double b) {
-    return add_r_impl(a, sf64_neg(b), mode);
+    sf64_internal_fe_acc fe;
+    const double r = add_r_impl(a, sf64_neg(b), mode, fe);
+    fe.flush();
+    return r;
 }
 
-static SF64_ALWAYS_INLINE double mul_r_impl(double a, double b, sf64_rounding_mode mode) noexcept {
+static SF64_ALWAYS_INLINE double mul_r_impl(double a, double b, sf64_rounding_mode mode,
+                                            sf64_internal_fe_acc& fe) noexcept {
     const uint64_t ab = bits_of(a);
     const uint64_t bb = bits_of(b);
     const uint32_t a_sign = extract_sign(ab);
@@ -466,7 +487,7 @@ static SF64_ALWAYS_INLINE double mul_r_impl(double a, double b, sf64_rounding_mo
     if (a_exp == kExpMax || b_exp == kExpMax) {
         if (is_zero_bits(ab) || is_zero_bits(bb)) {
             // 0 * inf (either ordering): invalid.
-            SF64_FE_RAISE(SF64_FE_INVALID);
+            fe.raise(SF64_FE_INVALID);
             return canonical_nan();
         }
         return make_signed_inf(r_sign);
@@ -475,18 +496,25 @@ static SF64_ALWAYS_INLINE double mul_r_impl(double a, double b, sf64_rounding_mo
     if (is_zero_bits(ab) || is_zero_bits(bb))
         return make_signed_zero(r_sign);
 
-    return mul_impl(ab, bb, r_sign, mode);
+    return mul_impl(ab, bb, r_sign, mode, fe);
 }
 
 extern "C" double sf64_mul(double a, double b) {
-    return mul_r_impl(a, b, SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = mul_r_impl(a, b, SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" double sf64_mul_r(sf64_rounding_mode mode, double a, double b) {
-    return mul_r_impl(a, b, mode);
+    sf64_internal_fe_acc fe;
+    const double r = mul_r_impl(a, b, mode, fe);
+    fe.flush();
+    return r;
 }
 
-static SF64_ALWAYS_INLINE double div_r_impl(double a, double b, sf64_rounding_mode mode) noexcept {
+static SF64_ALWAYS_INLINE double div_r_impl(double a, double b, sf64_rounding_mode mode,
+                                            sf64_internal_fe_acc& fe) noexcept {
     const uint64_t ab = bits_of(a);
     const uint64_t bb = bits_of(b);
     const uint32_t a_sign = extract_sign(ab);
@@ -502,7 +530,7 @@ static SF64_ALWAYS_INLINE double div_r_impl(double a, double b, sf64_rounding_mo
     const bool b_inf = (b_exp == kExpMax);
     if (a_inf && b_inf) {
         // inf / inf: invalid.
-        SF64_FE_RAISE(SF64_FE_INVALID);
+        fe.raise(SF64_FE_INVALID);
         return canonical_nan();
     }
     if (a_inf)
@@ -514,26 +542,32 @@ static SF64_ALWAYS_INLINE double div_r_impl(double a, double b, sf64_rounding_mo
     const bool b_zero = is_zero_bits(bb);
     if (a_zero && b_zero) {
         // 0 / 0: invalid.
-        SF64_FE_RAISE(SF64_FE_INVALID);
+        fe.raise(SF64_FE_INVALID);
         return canonical_nan();
     }
     if (b_zero) {
         // finite non-zero / 0: division by zero.
-        SF64_FE_RAISE(SF64_FE_DIVBYZERO);
+        fe.raise(SF64_FE_DIVBYZERO);
         return make_signed_inf(r_sign);
     }
     if (a_zero)
         return make_signed_zero(r_sign);
 
-    return div_impl(ab, bb, r_sign, mode);
+    return div_impl(ab, bb, r_sign, mode, fe);
 }
 
 extern "C" double sf64_div(double a, double b) {
-    return div_r_impl(a, b, SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = div_r_impl(a, b, SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" double sf64_div_r(sf64_rounding_mode mode, double a, double b) {
-    return div_r_impl(a, b, mode);
+    sf64_internal_fe_acc fe;
+    const double r = div_r_impl(a, b, mode, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" double sf64_rem(double a, double b) {
@@ -553,13 +587,22 @@ extern "C" double sf64_rem(double a, double b) {
     const uint32_t a_exp = extract_exp(ab);
     const uint32_t b_exp = extract_exp(bb);
 
+    // Stack-local accumulator; flushed to TLS at each return that might raise.
+    // rem is bit-exact on its output (no rounding step), so the only raises
+    // are the two INVALID paths below — the cost of the accumulator here is
+    // mainly so the mandatory round_and_pack call at the end has something
+    // to thread into (even though it's always exact).
+    sf64_internal_fe_acc fe;
+
     // fmod(±inf, y) = NaN;  fmod(x, 0) = NaN;  fmod(x, ±inf) = x when x finite.
     if (a_exp == kExpMax) {
-        SF64_FE_RAISE(SF64_FE_INVALID);
+        fe.raise(SF64_FE_INVALID);
+        fe.flush();
         return canonical_nan();
     }
     if (is_zero_bits(bb)) {
-        SF64_FE_RAISE(SF64_FE_INVALID);
+        fe.raise(SF64_FE_INVALID);
+        fe.flush();
         return canonical_nan();
     }
     if (b_exp == kExpMax)
@@ -649,5 +692,7 @@ extern "C" double sf64_rem(double a, double b) {
     // Convert to "shifted-left-by-9" layout for round_and_pack. Round bits
     // are zero since the remainder is exact, so `mode` is irrelevant here.
     const uint64_t sig_packed = sig_r << 9;
-    return round_and_pack(a_sign, exp_r, sig_packed, SF64_RNE);
+    const double r = round_and_pack(a_sign, exp_r, sig_packed, SF64_RNE, fe);
+    fe.flush();
+    return r;
 }

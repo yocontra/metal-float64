@@ -14,7 +14,7 @@
 
 namespace soft_fp64::internal {
 #if SOFT_FP64_FENV_MODE == 1
-thread_local unsigned sf64_internal_fe_flags = 0u;
+[[gnu::tls_model("initial-exec")]] thread_local unsigned sf64_internal_fe_flags = 0u;
 #endif
 } // namespace soft_fp64::internal
 

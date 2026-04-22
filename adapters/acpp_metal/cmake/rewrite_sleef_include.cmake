@@ -20,4 +20,8 @@ endif()
 
 file(READ "${INPUT}" content)
 string(REPLACE "../../include/soft_fp64/" "soft_fp64/" content "${content}")
+# Sibling-escape rewrite for the private fenv shim: in the upstream
+# tree, some SLEEF TUs reach `src/internal_fenv.h` via `../internal_fenv.h`.
+# In the flat staged layout the header sits next to the .cpp.
+string(REPLACE "../internal_fenv.h" "internal_fenv.h" content "${content}")
 file(WRITE "${OUTPUT}" "${content}")

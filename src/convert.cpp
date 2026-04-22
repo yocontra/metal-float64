@@ -39,15 +39,18 @@ using soft_fp64::internal::kImplicitBit;
 using soft_fp64::internal::kQuietNaNBit;
 using soft_fp64::internal::kSignMask;
 using soft_fp64::internal::pack;
+using soft_fp64::internal::sf64_internal_fe_acc;
 using soft_fp64::internal::sf64_internal_should_round_up;
 
 // ---- u64 -> f64 (core integer widening path) ----------------------------
 //
 // Takes a non-zero 64-bit magnitude, returns the correctly-rounded fp64 bit
 // pattern with the caller-supplied sign (directed-mode rounding needs the
-// sign at the decision point).
+// sign at the decision point). `fe` collects INEXACT on the round step; the
+// caller flushes once at return.
 SF64_ALWAYS_INLINE uint64_t u64_magnitude_to_fp64_bits(uint64_t mag, uint32_t sign,
-                                                       sf64_rounding_mode mode) noexcept {
+                                                       sf64_rounding_mode mode,
+                                                       sf64_internal_fe_acc& fe) noexcept {
     // Pre: mag != 0.
     //
     // Find the position of the leading 1. After a left-shift by `lz`, the
@@ -77,7 +80,7 @@ SF64_ALWAYS_INLINE uint64_t u64_magnitude_to_fp64_bits(uint64_t mag, uint32_t si
     const bool lsb = (mantissa & 1u) != 0;
 
     if (round_bit || sticky) {
-        SF64_FE_RAISE(SF64_FE_INEXACT);
+        fe.raise(SF64_FE_INEXACT);
     }
 
     uint64_t rounded = mantissa;
@@ -98,7 +101,8 @@ SF64_ALWAYS_INLINE uint64_t u64_magnitude_to_fp64_bits(uint64_t mag, uint32_t si
 }
 
 // ---- signed 64-bit integer -> f64 ---------------------------------------
-SF64_ALWAYS_INLINE double i64_to_fp64(int64_t x, sf64_rounding_mode mode) noexcept {
+SF64_ALWAYS_INLINE double i64_to_fp64(int64_t x, sf64_rounding_mode mode,
+                                      sf64_internal_fe_acc& fe) noexcept {
     if (x == 0)
         return from_bits(0u);
 
@@ -117,14 +121,15 @@ SF64_ALWAYS_INLINE double i64_to_fp64(int64_t x, sf64_rounding_mode mode) noexce
         mag = raw;
     }
 
-    return from_bits(u64_magnitude_to_fp64_bits(mag, sign, mode));
+    return from_bits(u64_magnitude_to_fp64_bits(mag, sign, mode, fe));
 }
 
 // ---- unsigned 64-bit integer -> f64 -------------------------------------
-SF64_ALWAYS_INLINE double u64_to_fp64(uint64_t x, sf64_rounding_mode mode) noexcept {
+SF64_ALWAYS_INLINE double u64_to_fp64(uint64_t x, sf64_rounding_mode mode,
+                                      sf64_internal_fe_acc& fe) noexcept {
     if (x == 0)
         return from_bits(0u);
-    return from_bits(u64_magnitude_to_fp64_bits(x, /*sign=*/0u, mode));
+    return from_bits(u64_magnitude_to_fp64_bits(x, /*sign=*/0u, mode, fe));
 }
 
 // ---- f64 -> u64 magnitude, mode-rounding & saturating -------------------
@@ -134,7 +139,8 @@ SF64_ALWAYS_INLINE double u64_to_fp64(uint64_t x, sf64_rounding_mode mode) noexc
 // fractional boundary (directed modes depend on it). NaN sets `is_nan`.
 // +inf / finite overflow sets `too_large` and returns UINT64_MAX.
 SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, uint32_t sign, sf64_rounding_mode mode,
-                                                  bool* too_large, bool* is_nan) noexcept {
+                                                  bool* too_large, bool* is_nan,
+                                                  sf64_internal_fe_acc& fe) noexcept {
     const uint64_t b = bits_of(x);
     const uint32_t exp = extract_exp(b);
     const uint64_t frac = extract_frac(b);
@@ -145,12 +151,12 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, uint32_t sign, sf64_
     if (exp == kExpMax) {
         if (frac != 0) {
             // NaN → int is invalid.
-            SF64_FE_RAISE(SF64_FE_INVALID);
+            fe.raise(SF64_FE_INVALID);
             *is_nan = true;
             return 0;
         }
         // ±inf → out-of-range saturation is invalid (IEEE 754 §7.2).
-        SF64_FE_RAISE(SF64_FE_INVALID);
+        fe.raise(SF64_FE_INVALID);
         *too_large = true;
         return ~uint64_t{0};
     }
@@ -164,7 +170,7 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, uint32_t sign, sf64_
             return 0; // exact zero, no rounding decision
         }
         // Any non-zero input < 0.5 rounds to 0 or ±1 → inexact.
-        SF64_FE_RAISE(SF64_FE_INEXACT);
+        fe.raise(SF64_FE_INEXACT);
         const bool nonzero = true;
         if ((mode == SF64_RUP && sign == 0u && nonzero) ||
             (mode == SF64_RDN && sign != 0u && nonzero)) {
@@ -178,7 +184,7 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, uint32_t sign, sf64_
     if (e == -1) {
         // |x| in [0.5, 1). Truncated magnitude is 0; dropped bits are the
         // entire mantissa. round_bit = implicit bit (true), sticky = frac != 0.
-        SF64_FE_RAISE(SF64_FE_INEXACT);
+        fe.raise(SF64_FE_INEXACT);
         const bool round_bit = true;
         const bool sticky = frac != 0;
         if (sf64_internal_should_round_up(sign, round_bit, sticky, /*lsb=*/false, mode)) {
@@ -192,7 +198,7 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, uint32_t sign, sf64_
         // range: invalid (per IEEE 754 §7.2 the saturating-convert path
         // signals INVALID; the callers replace the returned magnitude with
         // the type's saturation value).
-        SF64_FE_RAISE(SF64_FE_INVALID);
+        fe.raise(SF64_FE_INVALID);
         *too_large = true;
         return ~uint64_t{0};
     }
@@ -210,14 +216,14 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, uint32_t sign, sf64_
     const bool sticky = shift >= 2 && (mant & (round_pos - 1u)) != 0;
     const bool lsb = (trunc & 1u) != 0;
     if (round_bit || sticky) {
-        SF64_FE_RAISE(SF64_FE_INEXACT);
+        fe.raise(SF64_FE_INEXACT);
     }
     uint64_t rounded = trunc;
     if (sf64_internal_should_round_up(sign, round_bit, sticky, lsb, mode)) {
         rounded += 1u;
         if (rounded == 0) {
             // Carry past the 64-bit boundary → invalid.
-            SF64_FE_RAISE(SF64_FE_INVALID);
+            fe.raise(SF64_FE_INVALID);
             *too_large = true;
             return ~uint64_t{0};
         }
@@ -229,13 +235,14 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_u64_magnitude(double x, uint32_t sign, sf64_
 //
 // `imin`/`imax` are the destination type bounds as signed 64-bit values.
 SF64_ALWAYS_INLINE int64_t fp64_to_signed(double x, int64_t imin, int64_t imax,
-                                          sf64_rounding_mode mode) noexcept {
+                                          sf64_rounding_mode mode,
+                                          sf64_internal_fe_acc& fe) noexcept {
     const uint64_t b = bits_of(x);
     const uint32_t sign = extract_sign(b);
 
     bool too_large = false;
     bool is_nan = false;
-    const uint64_t mag = fp64_to_u64_magnitude(x, sign, mode, &too_large, &is_nan);
+    const uint64_t mag = fp64_to_u64_magnitude(x, sign, mode, &too_large, &is_nan, fe);
 
     if (is_nan)
         return 0;
@@ -257,7 +264,7 @@ SF64_ALWAYS_INLINE int64_t fp64_to_signed(double x, int64_t imin, int64_t imax,
         }
         if (mag > neg_cap) {
             // Saturation past the signed destination floor → invalid.
-            SF64_FE_RAISE(SF64_FE_INVALID);
+            fe.raise(SF64_FE_INVALID);
             return imin;
         }
         // Now -mag is representable as int64_t (or equals INT64_MIN for mag == 2^63).
@@ -271,21 +278,21 @@ SF64_ALWAYS_INLINE int64_t fp64_to_signed(double x, int64_t imin, int64_t imax,
     // Positive: value is +mag. Saturate against imax (>= 0).
     const uint64_t pos_cap = static_cast<uint64_t>(imax);
     if (mag > pos_cap) {
-        SF64_FE_RAISE(SF64_FE_INVALID);
+        fe.raise(SF64_FE_INVALID);
         return imax;
     }
     return static_cast<int64_t>(mag);
 }
 
 // ---- f64 -> unsigned integer, saturating to [0, type_max] ---------------
-SF64_ALWAYS_INLINE uint64_t fp64_to_unsigned(double x, uint64_t umax,
-                                             sf64_rounding_mode mode) noexcept {
+SF64_ALWAYS_INLINE uint64_t fp64_to_unsigned(double x, uint64_t umax, sf64_rounding_mode mode,
+                                             sf64_internal_fe_acc& fe) noexcept {
     const uint64_t b = bits_of(x);
     const uint32_t sign = extract_sign(b);
 
     bool too_large = false;
     bool is_nan = false;
-    const uint64_t mag = fp64_to_u64_magnitude(x, sign, mode, &too_large, &is_nan);
+    const uint64_t mag = fp64_to_u64_magnitude(x, sign, mode, &too_large, &is_nan, fe);
 
     if (is_nan)
         return 0;
@@ -295,7 +302,7 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_unsigned(double x, uint64_t umax,
         // unsigned destination). A negative value that rounded to a
         // non-zero magnitude is out-of-range for the unsigned type → INVALID.
         if (mag != 0) {
-            SF64_FE_RAISE(SF64_FE_INVALID);
+            fe.raise(SF64_FE_INVALID);
         }
         return 0;
     }
@@ -303,7 +310,7 @@ SF64_ALWAYS_INLINE uint64_t fp64_to_unsigned(double x, uint64_t umax,
     if (too_large)
         return umax;
     if (mag > umax) {
-        SF64_FE_RAISE(SF64_FE_INVALID);
+        fe.raise(SF64_FE_INVALID);
         return umax;
     }
     return mag;
@@ -389,7 +396,8 @@ SF64_ALWAYS_INLINE uint32_t f32_overflow_bits(uint32_t sign, sf64_rounding_mode 
     }
 }
 
-SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept {
+SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode,
+                                     sf64_internal_fe_acc& fe) noexcept {
     const uint64_t b = bits_of(x);
     const uint32_t sign = extract_sign(b);
     const uint32_t exp64 = extract_exp(b);
@@ -416,7 +424,7 @@ SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept
         }
         // Non-zero f64 subnormal collapsing to an f32 zero or denorm_min
         // is tiny + inexact → UNDERFLOW + INEXACT.
-        SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+        fe.raise(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
         if ((mode == SF64_RUP && sign == 0u) || (mode == SF64_RDN && sign != 0u)) {
             const uint32_t out = (sign << 31) | 1u;
             return __builtin_bit_cast(float, out);
@@ -429,7 +437,7 @@ SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept
     const int new_exp = unbiased + 127;
 
     if (new_exp >= 0xFF) {
-        SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+        fe.raise(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
         return __builtin_bit_cast(float, f32_overflow_bits(sign, mode));
     }
 
@@ -452,7 +460,7 @@ SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept
         if (rounded & (uint64_t{1} << 24)) {
             exp_out += 1u;
             if (exp_out >= 0xFFu) {
-                SF64_FE_RAISE(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
+                fe.raise(SF64_FE_OVERFLOW | SF64_FE_INEXACT);
                 return __builtin_bit_cast(float, f32_overflow_bits(sign, mode));
             }
             frac_out = 0;
@@ -460,7 +468,7 @@ SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept
             frac_out = static_cast<uint32_t>(rounded) & 0x7FFFFFu;
         }
         if (round_bit || sticky) {
-            SF64_FE_RAISE(SF64_FE_INEXACT);
+            fe.raise(SF64_FE_INEXACT);
         }
         const uint32_t out = (sign << 31) | (exp_out << 23) | frac_out;
         return __builtin_bit_cast(float, out);
@@ -478,7 +486,7 @@ SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept
             return __builtin_bit_cast(float, out);
         }
         // Tiny input lost entirely → UNDERFLOW + INEXACT.
-        SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+        fe.raise(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
         if ((mode == SF64_RUP && sign == 0u) || (mode == SF64_RDN && sign != 0u)) {
             const uint32_t out = (sign << 31) | 1u;
             return __builtin_bit_cast(float, out);
@@ -503,7 +511,7 @@ SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept
     // "rounded into smallest normal" branch still counts — IEEE 754 §7.5
     // treats it as an underflow signalling event.
     if (round_bit || sticky) {
-        SF64_FE_RAISE(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
+        fe.raise(SF64_FE_UNDERFLOW | SF64_FE_INEXACT);
     }
 
     if (rounded & (uint64_t{1} << 23)) {
@@ -520,11 +528,17 @@ SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode) noexcept
 } // namespace
 
 extern "C" float sf64_to_f32(double x) {
-    return to_f32_impl(x, SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const float r = to_f32_impl(x, SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" float sf64_to_f32_r(sf64_rounding_mode mode, double x) {
-    return to_f32_impl(x, mode);
+    sf64_internal_fe_acc fe;
+    const float r = to_f32_impl(x, mode, fe);
+    fe.flush();
+    return r;
 }
 
 // -------------------------------------------------------------------------
@@ -532,29 +546,53 @@ extern "C" float sf64_to_f32_r(sf64_rounding_mode mode, double x) {
 // -------------------------------------------------------------------------
 
 extern "C" double sf64_from_i8(int8_t x) {
-    return i64_to_fp64(static_cast<int64_t>(x), SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = i64_to_fp64(static_cast<int64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 extern "C" double sf64_from_i16(int16_t x) {
-    return i64_to_fp64(static_cast<int64_t>(x), SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = i64_to_fp64(static_cast<int64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 extern "C" double sf64_from_i32(int32_t x) {
-    return i64_to_fp64(static_cast<int64_t>(x), SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = i64_to_fp64(static_cast<int64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 extern "C" double sf64_from_i64(int64_t x) {
-    return i64_to_fp64(x, SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = i64_to_fp64(x, SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" double sf64_from_u8(uint8_t x) {
-    return u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 extern "C" double sf64_from_u16(uint16_t x) {
-    return u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 extern "C" double sf64_from_u32(uint32_t x) {
-    return u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 extern "C" double sf64_from_u64(uint64_t x) {
-    return u64_to_fp64(x, SF64_RNE);
+    sf64_internal_fe_acc fe;
+    const double r = u64_to_fp64(x, SF64_RNE, fe);
+    fe.flush();
+    return r;
 }
 
 // -------------------------------------------------------------------------
@@ -562,53 +600,101 @@ extern "C" double sf64_from_u64(uint64_t x) {
 // -------------------------------------------------------------------------
 
 extern "C" int8_t sf64_to_i8(double x) {
-    return static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX, SF64_RTZ));
+    sf64_internal_fe_acc fe;
+    const int8_t r = static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
 }
 extern "C" int16_t sf64_to_i16(double x) {
-    return static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX, SF64_RTZ));
+    sf64_internal_fe_acc fe;
+    const int16_t r = static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
 }
 extern "C" int32_t sf64_to_i32(double x) {
-    return static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX, SF64_RTZ));
+    sf64_internal_fe_acc fe;
+    const int32_t r = static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
 }
 extern "C" int64_t sf64_to_i64(double x) {
-    return fp64_to_signed(x, INT64_MIN, INT64_MAX, SF64_RTZ);
+    sf64_internal_fe_acc fe;
+    const int64_t r = fp64_to_signed(x, INT64_MIN, INT64_MAX, SF64_RTZ, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" uint8_t sf64_to_u8(double x) {
-    return static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX, SF64_RTZ));
+    sf64_internal_fe_acc fe;
+    const uint8_t r = static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
 }
 extern "C" uint16_t sf64_to_u16(double x) {
-    return static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX, SF64_RTZ));
+    sf64_internal_fe_acc fe;
+    const uint16_t r = static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
 }
 extern "C" uint32_t sf64_to_u32(double x) {
-    return static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX, SF64_RTZ));
+    sf64_internal_fe_acc fe;
+    const uint32_t r = static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
 }
 extern "C" uint64_t sf64_to_u64(double x) {
-    return fp64_to_unsigned(x, UINT64_MAX, SF64_RTZ);
+    sf64_internal_fe_acc fe;
+    const uint64_t r = fp64_to_unsigned(x, UINT64_MAX, SF64_RTZ, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" int8_t sf64_to_i8_r(sf64_rounding_mode mode, double x) {
-    return static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX, mode));
+    sf64_internal_fe_acc fe;
+    const int8_t r = static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX, mode, fe));
+    fe.flush();
+    return r;
 }
 extern "C" int16_t sf64_to_i16_r(sf64_rounding_mode mode, double x) {
-    return static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX, mode));
+    sf64_internal_fe_acc fe;
+    const int16_t r = static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX, mode, fe));
+    fe.flush();
+    return r;
 }
 extern "C" int32_t sf64_to_i32_r(sf64_rounding_mode mode, double x) {
-    return static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX, mode));
+    sf64_internal_fe_acc fe;
+    const int32_t r = static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX, mode, fe));
+    fe.flush();
+    return r;
 }
 extern "C" int64_t sf64_to_i64_r(sf64_rounding_mode mode, double x) {
-    return fp64_to_signed(x, INT64_MIN, INT64_MAX, mode);
+    sf64_internal_fe_acc fe;
+    const int64_t r = fp64_to_signed(x, INT64_MIN, INT64_MAX, mode, fe);
+    fe.flush();
+    return r;
 }
 
 extern "C" uint8_t sf64_to_u8_r(sf64_rounding_mode mode, double x) {
-    return static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX, mode));
+    sf64_internal_fe_acc fe;
+    const uint8_t r = static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX, mode, fe));
+    fe.flush();
+    return r;
 }
 extern "C" uint16_t sf64_to_u16_r(sf64_rounding_mode mode, double x) {
-    return static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX, mode));
+    sf64_internal_fe_acc fe;
+    const uint16_t r = static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX, mode, fe));
+    fe.flush();
+    return r;
 }
 extern "C" uint32_t sf64_to_u32_r(sf64_rounding_mode mode, double x) {
-    return static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX, mode));
+    sf64_internal_fe_acc fe;
+    const uint32_t r = static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX, mode, fe));
+    fe.flush();
+    return r;
 }
 extern "C" uint64_t sf64_to_u64_r(sf64_rounding_mode mode, double x) {
-    return fp64_to_unsigned(x, UINT64_MAX, mode);
+    sf64_internal_fe_acc fe;
+    const uint64_t r = fp64_to_unsigned(x, UINT64_MAX, mode, fe);
+    fe.flush();
+    return r;
 }

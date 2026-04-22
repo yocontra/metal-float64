@@ -73,16 +73,22 @@ foreach(hdr ${SF64_PUBLIC_HEADERS})
     list(APPEND SF64_STAGED_OUTPUTS "${dst}")
 endforeach()
 
-# src/internal.h — copy verbatim. It uses "soft_fp64/defines.h" which
-# will resolve via the staged soft_fp64/ subdir next to it.
-add_custom_command(
-    OUTPUT "${SF64_STAGE_DIR}/internal.h"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/src/internal.h"
-            "${SF64_STAGE_DIR}/internal.h"
-    DEPENDS "${CMAKE_SOURCE_DIR}/src/internal.h"
-    COMMENT "Staging internal.h")
-list(APPEND SF64_STAGED_OUTPUTS "${SF64_STAGE_DIR}/internal.h")
+# src/internal.h and src/internal_fenv.h — copy verbatim. Both are
+# private headers the core TUs (`sqrt_fma.cpp`, `rounding.cpp`, etc.)
+# include as siblings. `internal.h` resolves `soft_fp64/defines.h` via
+# the staged soft_fp64/ subdir next to it; `internal_fenv.h` is
+# included directly by the sqrt/fma/rounding TUs for the fenv shim.
+foreach(priv_hdr internal.h internal_fenv.h)
+    set(dst "${SF64_STAGE_DIR}/${priv_hdr}")
+    add_custom_command(
+        OUTPUT "${dst}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/src/${priv_hdr}"
+                "${dst}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/src/${priv_hdr}"
+        COMMENT "Staging ${priv_hdr}")
+    list(APPEND SF64_STAGED_OUTPUTS "${dst}")
+endforeach()
 
 # src/*.cpp — copy verbatim. Their includes are "internal.h" (sibling)
 # and "soft_fp64/soft_f64.h" (next to .cpp via staged soft_fp64/).
@@ -115,17 +121,21 @@ foreach(hdr sleef_common.h sleef_internal.h)
     list(APPEND SF64_STAGED_OUTPUTS "${dst}")
 endforeach()
 
-# src/sleef/*.cpp — copy verbatim; they only include sleef_internal.h
-# (sibling in the staged dir).
+# src/sleef/*.cpp — route through the same include-rewrite used for the
+# SLEEF headers. Most TUs only reference sibling sleef_internal.h, but
+# at least one (`sleef_inv_hyp_pow.cpp`) reaches up to
+# `../internal_fenv.h` in the upstream tree — in the flat staged layout
+# that header is a sibling, so the rewrite converts the path.
 foreach(sleef_cpp ${SF64_SLEEF_CPP})
     set(dst "${SF64_STAGE_DIR}/${sleef_cpp}")
     add_custom_command(
         OUTPUT "${dst}"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_SOURCE_DIR}/src/sleef/${sleef_cpp}"
-                "${dst}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_SOURCE_DIR}/src/sleef/${sleef_cpp}
+                                 -DOUTPUT=${dst}
+                                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/rewrite_sleef_include.cmake
         DEPENDS "${CMAKE_SOURCE_DIR}/src/sleef/${sleef_cpp}"
-        COMMENT "Staging sleef/${sleef_cpp}")
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/rewrite_sleef_include.cmake"
+        COMMENT "Staging sleef/${sleef_cpp} with include-path rewrite")
     list(APPEND SF64_STAGED_OUTPUTS "${dst}")
 endforeach()
 
