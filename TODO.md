@@ -231,6 +231,65 @@ work is partial.
 
 ### Feature surface (not yet implemented)
 
+- **OpenCL C semantics mode.** Today `sf64_*` is strict IEEE-754
+  binary64 — denormals preserved, correctly-rounded basic ops, u10/u35
+  transcendentals. OpenCL C's `double` contract overlaps heavily but
+  differs in three places that matter to frontends like AdaptiveCpp's
+  SSCP emitter (and any SYCL / CUDA-on-Metal layer forwarding to
+  `sf64_*`):
+  1. **Denormal flush.** OpenCL leaves denormal handling
+     implementation-defined for `double`; most drivers FTZ (flush
+     denormal inputs and outputs to ±0). Consumers that spec-match
+     against the OpenCL reference get different bits from us in the
+     subnormal window.
+  2. **`native_*` family.** OpenCL exposes
+     `native_{sin,cos,tan,exp,exp2,exp10,log,log2,log10,sqrt,rsqrt,
+     recip,divide,powr}` at "implementation-defined accuracy" — the
+     fast/loose tier. We ship u10 for these names only; there is no
+     looser fast path.
+  3. **ULP-tolerance deltas.** A few ops have looser OpenCL bounds than
+     our U10 (e.g. `pow` is 16 ULP in OpenCL vs our U35 = 8 ULP); those
+     are strictly stricter-than-required for us, no action needed. But
+     `half_*` (8192 ULP) has no counterpart here.
+
+  Proposed shape (v1.2+):
+  - Add `SOFT_FP64_OCL=off|on` build option. When `on`, emit a parallel
+    `sf64_ocl_*` ABI surface alongside the strict core. Core unchanged.
+  - `SOFT_FP64_FTZ=off|on` build option (orthogonal to `OCL`) gates
+    denormal flush at `sf64_ocl_*` entry/exit. When `on`: inputs with
+    `|x| < DBL_MIN` are coerced to `copysign(0.0, x)` before dispatch,
+    and outputs with magnitude in `(0, DBL_MIN)` round to
+    `copysign(0.0, ·)`. New test tier OCL_FTZ in
+    `tests/mpfr/test_mpfr_diff.cpp` covers the flushed edges; TestFloat
+    FTZ vectors exist (`tininessBeforeRounding = 0`) and get wired
+    through `run_testfloat.cpp` under the new mode.
+  - `sf64_native_*` surface — looser/faster implementations of the
+    OpenCL `native_*` set. ULP tier TBD (OpenCL says "implementation-
+    defined"; propose u1024 as a non-binding bound so consumers have a
+    number). These are *new* implementations, not dials on the u10
+    SLEEF cores — the point is to skip DD tails entirely.
+  - Document conformance against a specific OpenCL version (3.0 full
+    profile is the target; 1.2 embedded profile's weaker `double`
+    optionality doesn't change the surface).
+  - AdaptiveCpp integration: `adapters/acpp_metal/` gains forwarders
+    `__acpp_sscp_native_*_f64` → `sf64_native_*` and the adapter's
+    CMake propagates `SOFT_FP64_FTZ` the same way Track 1.1's fenv-mode
+    carry-over propagates `SOFT_FP64_FENV`.
+
+  Not in scope for OCL mode: directed rounding (covered by `sf64_*_r`
+  under Track B), `half_*` / single-precision variants (different
+  library), fenv exception flags (OpenCL has no `<fenv.h>` equivalent;
+  `SOFT_FP64_FENV=disabled` is the OpenCL-matching fenv setting).
+
+  Critical files when this lands: `CMakeLists.txt` (new options);
+  `include/soft_fp64/soft_f64_ocl.h` (new header); `src/ocl/*.cpp`
+  (new TU tree — FTZ wrappers + `native_*` cores);
+  `tests/test_ocl_semantics.cpp` (new — FTZ + native_ ULP sweep);
+  `tests/testfloat/run_testfloat.cpp` (FTZ vector gate); `adapters/
+  acpp_metal/` (forwarders + CMake propagation); `CHANGELOG.md`,
+  `README.md` (new section: "OpenCL semantics mode"), `NOTICE`
+  (upstream attribution for any OpenCL CTS-derived vectors).
+
 - **`SOFT_FP64_FENV=explicit` caller-provided state ABI.** v1.1 reserves
   the `explicit` mode in CMake but compiles it identically to `disabled`
   (zero-cost no-op raise sites, `sf64_fe_*` surface present but
