@@ -75,9 +75,59 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     _sf64_add_fuzz_target(fuzz_remainder     fuzz_remainder.cpp)
     _sf64_add_fuzz_target(fuzz_narrow_int    fuzz_narrow_int.cpp)
 
+    # fuzz_rounding_modes links MPFR as the bit-exact oracle for the
+    # sf64_*_r surface. Mirror the pkg-config / find_library discovery
+    # from tests/mpfr/CMakeLists.txt so the target is skipped cleanly
+    # when MPFR is absent (keeps the default fuzz build workable on
+    # minimal hosts).
+    find_package(PkgConfig QUIET)
+    set(_fuzz_mpfr_found FALSE)
+    set(_fuzz_mpfr_include_dirs "")
+    set(_fuzz_mpfr_libraries "")
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FUZZ_MPFR_PC QUIET mpfr)
+        if(FUZZ_MPFR_PC_FOUND)
+            set(_fuzz_mpfr_found TRUE)
+            set(_fuzz_mpfr_include_dirs ${FUZZ_MPFR_PC_INCLUDE_DIRS})
+            set(_fuzz_mpfr_libraries ${FUZZ_MPFR_PC_LINK_LIBRARIES})
+            if(NOT _fuzz_mpfr_libraries)
+                set(_fuzz_mpfr_libraries ${FUZZ_MPFR_PC_LIBRARIES})
+            endif()
+            pkg_check_modules(FUZZ_GMP_PC QUIET gmp)
+            if(FUZZ_GMP_PC_FOUND)
+                list(APPEND _fuzz_mpfr_include_dirs ${FUZZ_GMP_PC_INCLUDE_DIRS})
+            endif()
+        endif()
+    endif()
+    if(NOT _fuzz_mpfr_found)
+        find_library(FUZZ_MPFR_LIB mpfr)
+        find_path(FUZZ_MPFR_INCLUDE mpfr.h)
+        if(FUZZ_MPFR_LIB AND FUZZ_MPFR_INCLUDE)
+            set(_fuzz_mpfr_found TRUE)
+            set(_fuzz_mpfr_include_dirs ${FUZZ_MPFR_INCLUDE})
+            set(_fuzz_mpfr_libraries ${FUZZ_MPFR_LIB})
+            find_library(FUZZ_GMP_LIB gmp)
+            find_path(FUZZ_GMP_INCLUDE gmp.h)
+            if(FUZZ_GMP_LIB)
+                list(APPEND _fuzz_mpfr_libraries ${FUZZ_GMP_LIB})
+            endif()
+            if(FUZZ_GMP_INCLUDE)
+                list(APPEND _fuzz_mpfr_include_dirs ${FUZZ_GMP_INCLUDE})
+            endif()
+        endif()
+    endif()
+    if(_fuzz_mpfr_found)
+        _sf64_add_fuzz_target(fuzz_rounding_modes fuzz_rounding_modes.cpp)
+        target_include_directories(fuzz_rounding_modes PRIVATE ${_fuzz_mpfr_include_dirs})
+        target_link_libraries(fuzz_rounding_modes PRIVATE ${_fuzz_mpfr_libraries})
+        message(STATUS "soft_fp64: fuzz_rounding_modes enabled (MPFR=${_fuzz_mpfr_include_dirs})")
+    else()
+        message(STATUS "soft_fp64: fuzz_rounding_modes skipped (MPFR not found)")
+    endif()
+
     message(STATUS "soft_fp64: libFuzzer targets enabled "
                    "(fuzz_arithmetic, fuzz_sqrt_fma, fuzz_transcendental, "
-                   "fuzz_fcmp, fuzz_remainder, fuzz_narrow_int)")
+                   "fuzz_fcmp, fuzz_remainder, fuzz_narrow_int, fuzz_rounding_modes)")
 else()
     message(WARNING
         "SOFT_FP64_BUILD_FUZZ=ON but the active C++ compiler is "
