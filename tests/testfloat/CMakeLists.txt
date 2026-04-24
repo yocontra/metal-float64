@@ -182,4 +182,8 @@ endif()
 add_dependencies(run_testfloat testfloat_gen)
 
 add_test(NAME test_testfloat COMMAND run_testfloat)
-set_tests_properties(test_testfloat PROPERTIES TIMEOUT 600)
+# Per-mode coverage added in TODO #10 roughly quadruples the 1.0 runtime
+# (5 modes × arithmetic + mulAdd + convert); bump the timeout
+# accordingly. On Apple Silicon the full sweep lands around 10-12
+# minutes under Release; CI adds margin for shared-runner noise.
+set_tests_properties(test_testfloat PROPERTIES TIMEOUT 2400)
