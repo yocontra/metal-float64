@@ -127,27 +127,31 @@ and silent (non-raising) exception behavior when `SOFT_FP64_FENV=disabled`.
   become thin wrappers that dispatch to the RNE helper when `mode=RNE`
   and keep the existing mode-parameterized body otherwise. No behavior
   change on the `sf64_*_r(mode, …)` surface. Net 1.1-final bench profile
-  on Apple M2 Max, release build, `--min-time-ms=500`, vs the 1.0
-  `bench/baseline.json` (macos-14 GHA, M-series):
+  on Apple M2 Max local hardware (not the macos-14 GHA M1 fleet that CI
+  runs on — jitter between classes is within the 20% gate), release
+  build, `--min-time-ms=500`, vs the 1.0 `bench/baseline.json`. The
+  "1.1 tls" column is the committed refreshed `bench/baseline.json` for
+  this release; the "1.1 disabled" column is a parallel measurement for
+  consumers who build with `SOFT_FP64_FENV=disabled`:
 
-  | op       | 1.0    | 1.1 disabled | 1.1 tls |
-  |----------|--------|--------------|---------|
-  | `add`    | 10.89  | 11.50 (+6%)  | 12.45 (+14%)  |
-  | `sub`    | 11.14  | 11.32 (+2%)  | 13.48 (+21%)  |
-  | `mul`    | 5.19   | 5.56 (+7%)   | 6.47 (+25%)   |
-  | `div`    | 16.87  | 18.25 (+8%)  | 18.69 (+11%)  |
-  | `fma`    | 17.93  | 19.00 (+6%)  | 20.00 (+12%)  |
-  | `to_i32` | 4.89   | 2.68 (−45%)  | 7.35 (+50%)   |
-  | `pow`    | 1324.2 | 1685.7 (+27%)| 1722.1 (+30%) |
-  | `log`    | 472.1  | 368.1 (−22%) | 369.7 (−22%)  |
-  | `exp`    | 256.5  | 216.0 (−16%) | 221.9 (−13%)  |
-  | `exp2`   | 274.6  | 211.7 (−23%) | 215.8 (−21%)  |
-  | `cbrt`   | 1109.0 | 879.5 (−21%) | 881.9 (−21%)  |
-  | `sin`    | 446.5  | 404.1 (−9%)  | 405.8 (−9%)   |
-  | `cos`    | 524.7  | 447.6 (−15%) | 449.7 (−14%)  |
-  | `tan`    | —      | −18% vs 1.0  | −17% vs 1.0   |
-  | `sinh` / `cosh` / `tanh` | | −14 to −15% | −14 to −15% |
-  | `asinh` / `acosh` / `atanh` | | −16 to −20% | −13 to −16% |
+  | op       | 1.0    | 1.1 disabled | 1.1 tls (committed baseline) |
+  |----------|--------|--------------|------------------------------|
+  | `add`    | 10.89  | 11.50 (+6%)  | 12.45 (+14%)                 |
+  | `sub`    | 11.14  | 11.32 (+2%)  | 13.48 (+21%)                 |
+  | `mul`    | 5.19   | 5.56 (+7%)   | 6.47 (+25%)                  |
+  | `div`    | 16.87  | 18.25 (+8%)  | 18.69 (+11%)                 |
+  | `fma`    | 17.93  | 19.00 (+6%)  | 20.00 (+12%)                 |
+  | `to_i32` | 4.89   | 2.68 (−45%)  | 7.35 (+50%)                  |
+  | `pow`    | 1324.2 | 1685.7 (+27%)| 1722.1 (+30%)                |
+  | `log`    | 472.1  | 368.1 (−22%) | 380.2 (−19%)                 |
+  | `exp`    | 256.5  | 216.0 (−16%) | 221.9 (−13%)                 |
+  | `exp2`   | 274.6  | 211.7 (−23%) | 220.8 (−20%)                 |
+  | `cbrt`   | 1109.0 | 879.5 (−21%) | 898.0 (−19%)                 |
+  | `sin`    | 446.5  | 404.1 (−9%)  | 405.8 (−9%)                  |
+  | `cos`    | 524.7  | 447.6 (−15%) | 449.7 (−14%)                 |
+  | `tan`    | —      | −18% vs 1.0  | −17% vs 1.0                  |
+  | `sinh` / `cosh` / `tanh` | | −14 to −15% | −14 to −15%        |
+  | `asinh` / `acosh` / `atanh` | | −16 to −20% | −13 to −16%     |
 
   Every transcendental that composes SLEEF DD primitives runs faster
   than 1.0 because the DD primitives no longer pay per-call TLS /
