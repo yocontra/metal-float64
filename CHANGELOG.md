@@ -7,7 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Every numeric claim in this file traces to a specific CI-gated sweep.
 See `README.md` for the full precision table.
 
-## [1.1.0] — unreleased
+## [1.1.0] — 2026-04-24
 
 Additive release on top of 1.0. Three integrity-layer features land:
 non-RNE rounding modes, IEEE-754 exception flags with thread-local
