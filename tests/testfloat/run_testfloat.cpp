@@ -35,6 +35,7 @@
 //
 // SPDX-License-Identifier: MIT
 
+#include "soft_fp64/rounding_mode.h"
 #include "soft_fp64/soft_f64.h"
 
 #include <cinttypes>
@@ -43,7 +44,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #ifndef SF64_TESTFLOAT_GEN_PATH
@@ -198,10 +201,38 @@ static bool parse_hex_n(const char* line, int n, uint64_t out[]) {
     return true;
 }
 
+// ---- rounding-mode table -----------------------------------------------
+//
+// TestFloat-gen accepts five rounding-mode flags matching IEEE-754's five
+// modes. `sf64_rounding_mode` maps onto them verbatim:
+//
+//   SF64_RNE -> -rnear_even     (nearest, ties to even)
+//   SF64_RTZ -> -rminMag        (toward zero)
+//   SF64_RUP -> -rmax           (toward +infinity)
+//   SF64_RDN -> -rmin           (toward -infinity)
+//   SF64_RNA -> -rnear_maxMag   (nearest, ties away from zero)
+//
+// The label is used in failure messages so a per-mode regression
+// identifies itself unambiguously.
+struct ModeRow {
+    sf64_rounding_mode mode;
+    const char* tf_flag; // testfloat_gen -rXXX flag
+    const char* label;   // short mode name for printouts
+};
+static const ModeRow kModes[] = {
+    {SF64_RNE, "-rnear_even", "RNE"},   {SF64_RTZ, "-rminMag", "RTZ"},
+    {SF64_RUP, "-rmax", "RUP"},         {SF64_RDN, "-rmin", "RDN"},
+    {SF64_RNA, "-rnear_maxMag", "RNA"},
+};
+
 // ---- per-op runners ----------------------------------------------------
 
 // f64 binary: add/sub/mul/div/rem
 typedef double (*f64_binop)(double, double);
+typedef double (*f64_binop_r)(sf64_rounding_mode, double, double);
+typedef double (*f64_unop_r)(sf64_rounding_mode, double);
+typedef double (*f64_fma_r_fn)(sf64_rounding_mode, double, double, double);
+typedef float (*f64_to_f32_r_fn)(sf64_rounding_mode, double);
 
 static uint64_t run_f64_binop(const char* op, f64_binop fn, const std::vector<const char*>& flags) {
     Proc p;
@@ -852,6 +883,283 @@ static uint64_t run_f64_to_f32() {
     return n;
 }
 
+// ---- per-mode runners (sf64_*_r surface) -------------------------------
+//
+// For each (op, mode) pair TestFloat generates a fresh corpus under the
+// matching -r<flag> and we call sf64_*_r(mode, ...). Non-arithmetic ops
+// (compare) don't depend on rounding mode and are not mode-looped.
+
+static uint64_t run_f64_binop_rmode(const char* op, f64_binop_r fn, sf64_rounding_mode m,
+                                    const char* mode_label, const ModeRow& row) {
+    Proc p;
+    const std::vector<const char*> flags = {"-tininessbefore", row.tf_flag};
+    if (!p.open(mk_cmd(op, flags))) {
+        std::fprintf(stderr, "FAIL[%s-%s]: cannot spawn testfloat_gen\n", op, mode_label);
+        std::abort();
+    }
+    char line[256];
+    uint64_t n = 0;
+    while (std::fgets(line, sizeof(line), p.fp)) {
+        uint64_t v[4];
+        if (!parse_hex_n(line, 4, v))
+            fail(op, n, line, "parse");
+        double a = from_bits(v[0]);
+        double b = from_bits(v[1]);
+        double z = from_bits(v[2]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[3]);
+        sf64_fe_clear(0x1Fu);
+        double got = fn(m, a, b);
+        if (!nan_equiv(got, z)) {
+            char detail[160];
+            std::snprintf(detail, sizeof(detail),
+                          "mode=%s got=0x%016" PRIx64 " expect=0x%016" PRIx64, mode_label,
+                          bits(got), v[2]);
+            fail(op, n, line, detail);
+        }
+        const bool has_snan_input = is_snan_f64_bits(v[0]) || is_snan_f64_bits(v[1]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[192];
+                std::snprintf(detail, sizeof(detail),
+                              "mode=%s flags got=0x%02x expected=0x%02x result=0x%016" PRIx64,
+                              mode_label, got_flags, expected_flags, bits(got));
+                fail(op, n, line, detail);
+            }
+        }
+        ++n;
+    }
+    return n;
+}
+
+static uint64_t run_f64_unop_rmode(const char* op, f64_unop_r fn, sf64_rounding_mode m,
+                                   const char* mode_label, const ModeRow& row) {
+    Proc p;
+    const std::vector<const char*> flags = {"-tininessbefore", row.tf_flag};
+    if (!p.open(mk_cmd(op, flags)))
+        std::abort();
+    char line[256];
+    uint64_t n = 0;
+    while (std::fgets(line, sizeof(line), p.fp)) {
+        uint64_t v[3];
+        if (!parse_hex_n(line, 3, v))
+            fail(op, n, line, "parse");
+        double a = from_bits(v[0]);
+        double z = from_bits(v[1]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[2]);
+        sf64_fe_clear(0x1Fu);
+        double got = fn(m, a);
+        if (!nan_equiv(got, z)) {
+            char detail[160];
+            std::snprintf(detail, sizeof(detail),
+                          "mode=%s got=0x%016" PRIx64 " expect=0x%016" PRIx64, mode_label,
+                          bits(got), v[1]);
+            fail(op, n, line, detail);
+        }
+        const bool has_snan_input = is_snan_f64_bits(v[0]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[192];
+                std::snprintf(detail, sizeof(detail),
+                              "mode=%s flags got=0x%02x expected=0x%02x result=0x%016" PRIx64,
+                              mode_label, got_flags, expected_flags, bits(got));
+                fail(op, n, line, detail);
+            }
+        }
+        ++n;
+    }
+    return n;
+}
+
+static uint64_t run_f64_mulAdd_rmode(uint64_t n_cases, sf64_rounding_mode m, const char* mode_label,
+                                     const ModeRow& row) {
+    const char* op = "f64_mulAdd";
+    char ncount[32];
+    std::snprintf(ncount, sizeof(ncount), "%" PRIu64, n_cases);
+    Proc p;
+    if (!p.open(mk_cmd(op, {"-n", ncount, "-tininessbefore", row.tf_flag})))
+        std::abort();
+    char line[256];
+    uint64_t n = 0;
+    while (std::fgets(line, sizeof(line), p.fp)) {
+        uint64_t v[5];
+        if (!parse_hex_n(line, 5, v))
+            fail(op, n, line, "parse");
+        double a = from_bits(v[0]);
+        double b = from_bits(v[1]);
+        double c = from_bits(v[2]);
+        double z = from_bits(v[3]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[4]);
+        sf64_fe_clear(0x1Fu);
+        double got = sf64_fma_r(m, a, b, c);
+        if (!nan_equiv(got, z)) {
+            char detail[160];
+            std::snprintf(detail, sizeof(detail),
+                          "mode=%s got=0x%016" PRIx64 " expect=0x%016" PRIx64, mode_label,
+                          bits(got), v[3]);
+            fail(op, n, line, detail);
+        }
+        const bool has_snan_input =
+            is_snan_f64_bits(v[0]) || is_snan_f64_bits(v[1]) || is_snan_f64_bits(v[2]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[192];
+                std::snprintf(detail, sizeof(detail),
+                              "mode=%s flags got=0x%02x expected=0x%02x result=0x%016" PRIx64,
+                              mode_label, got_flags, expected_flags, bits(got));
+                fail(op, n, line, detail);
+            }
+        }
+        ++n;
+    }
+    return n;
+}
+
+// f64 -> int under mode m. `-exact` preserved so TestFloat raises INEXACT
+// on lossy int conversions (IEEE §5.4.1). We thread the mode through
+// both sides — Berkeley's oracle rounds per `row.tf_flag` and we call
+// `sf64_to_i*_r(m, ...)`. In-range check is done AFTER rounding under
+// mode `m`: a value that rounds to INT_MAX + 1 under RNE but to
+// INT_MAX under RTZ is in-range for RTZ only. Berkeley sends a
+// saturation sentinel (INT_MIN on x86-SSE) for truly out-of-range
+// vectors; we only bit-compare rows where the rounded value is
+// representable and skip sentinel rows (the existing RNE leg
+// documents this convention).
+template <typename IntT, IntT (*Fn)(sf64_rounding_mode, double)>
+static uint64_t run_f64_to_int_rmode(const char* op, double tmin, double tmax_plus_one,
+                                     sf64_rounding_mode m, const char* mode_label,
+                                     const ModeRow& row) {
+    Proc p;
+    if (!p.open(mk_cmd(op, {row.tf_flag, "-exact"})))
+        std::abort();
+    char line[256];
+    uint64_t n = 0;
+    uint64_t skipped_oor = 0;
+    while (std::fgets(line, sizeof(line), p.fp)) {
+        uint64_t v[3];
+        if (!parse_hex_n(line, 3, v))
+            fail(op, n, line, "parse");
+        double a = from_bits(v[0]);
+        // Pre-filter obvious junk: NaN/inf, far-out-of-range. The tight
+        // in-range check comes post-rounding below.
+        const bool base_in_range =
+            !std::isnan(a) && std::isfinite(a) && a >= tmin && a < tmax_plus_one;
+        if (!base_in_range) {
+            ++skipped_oor;
+            ++n;
+            continue;
+        }
+        // Post-rounding range: reject anything whose oracle result
+        // equals Berkeley's saturation sentinel (INT_MIN for signed,
+        // UINT_MAX for unsigned). Those vectors exercise the saturation
+        // semantics where sf64_* and softfloat disagree by design.
+        const IntT z = (IntT)v[1];
+        const bool saturated_sentinel =
+            (std::is_signed<IntT>::value)
+                ? (z == std::numeric_limits<IntT>::min() && a > 0.0)
+                : (z == std::numeric_limits<IntT>::max() && a > static_cast<double>(z));
+        if (saturated_sentinel) {
+            ++skipped_oor;
+            ++n;
+            continue;
+        }
+        const unsigned expected_flags = sf_flags_from_softfloat(v[2]);
+        sf64_fe_clear(0x1Fu);
+        IntT got = Fn(m, a);
+        if (got != z) {
+            char detail[192];
+            std::snprintf(detail, sizeof(detail),
+                          "mode=%s a=0x%016" PRIx64 " got=0x%016" PRIx64 " expect=0x%016" PRIx64,
+                          mode_label, v[0], (uint64_t)(uint64_t)got, (uint64_t)(uint64_t)z);
+            fail(op, n, line, detail);
+        }
+        if (kFlagsActive) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                char detail[192];
+                std::snprintf(detail, sizeof(detail),
+                              "mode=%s a=0x%016" PRIx64 " flags got=0x%02x expected=0x%02x",
+                              mode_label, v[0], got_flags, expected_flags);
+                fail(op, n, line, detail);
+            }
+        }
+        ++n;
+    }
+    std::fprintf(stderr,
+                 "    [%s-%s] %" PRIu64 " / %" PRIu64 " vectors in-range checked (%" PRIu64
+                 " skipped OOR)\n",
+                 op, mode_label, n - skipped_oor, n, skipped_oor);
+    return n;
+}
+
+// f64 -> f32 under mode m. Runs the runner under the requested testfloat
+// flag and compares against sf64_to_f32_r(m, x).
+static uint64_t run_f64_to_f32_rmode(sf64_rounding_mode m, const char* mode_label,
+                                     const ModeRow& row) {
+    const char* op = "f64_to_f32";
+    Proc p;
+    if (!p.open(mk_cmd(op, {row.tf_flag, "-tininessbefore"})))
+        std::abort();
+    char line[256];
+    uint64_t n = 0;
+    uint64_t mismatches = 0;
+    uint64_t flag_mismatches = 0;
+    char first_detail[256] = {0};
+    char first_flag_detail[256] = {0};
+    while (std::fgets(line, sizeof(line), p.fp)) {
+        uint64_t v[3];
+        if (!parse_hex_n(line, 3, v))
+            fail(op, n, line, "parse");
+        double a = from_bits(v[0]);
+        float z = f32_from_bits((uint32_t)v[1]);
+        const unsigned expected_flags = sf_flags_from_softfloat(v[2]);
+        sf64_fe_clear(0x1Fu);
+        float got = sf64_to_f32_r(m, a);
+        if (!nan_equiv_f32(got, z)) {
+            if (mismatches < 5) {
+                std::fprintf(stderr,
+                             "  [%s-%s] mismatch line=%" PRIu64 " a=0x%016" PRIx64
+                             " got=0x%08x expect=0x%08x\n",
+                             op, mode_label, n, v[0], bits_f32(got), (uint32_t)v[1]);
+            }
+            if (mismatches == 0) {
+                std::snprintf(first_detail, sizeof(first_detail),
+                              "mode=%s line=%" PRIu64 " a=0x%016" PRIx64
+                              " got=0x%08x expect=0x%08x",
+                              mode_label, n, v[0], bits_f32(got), (uint32_t)v[1]);
+            }
+            ++mismatches;
+        }
+        const bool has_snan_input = is_snan_f64_bits(v[0]);
+        if (kFlagsActive && !has_snan_input) {
+            const unsigned got_flags = sf64_fe_getall();
+            if (got_flags != expected_flags) {
+                if (flag_mismatches == 0) {
+                    std::snprintf(first_flag_detail, sizeof(first_flag_detail),
+                                  "mode=%s line=%" PRIu64 " a=0x%016" PRIx64
+                                  " flags got=0x%02x expected=0x%02x",
+                                  mode_label, n, v[0], got_flags, expected_flags);
+                }
+                ++flag_mismatches;
+            }
+        }
+        ++n;
+    }
+    if (mismatches) {
+        std::fprintf(stderr, "FAIL[%s-%s] %" PRIu64 " / %" PRIu64 " mismatches; first: %s\n", op,
+                     mode_label, mismatches, n, first_detail);
+        std::abort();
+    }
+    if (flag_mismatches) {
+        std::fprintf(stderr, "FAIL[%s-%s] %" PRIu64 " / %" PRIu64 " flag mismatches; first: %s\n",
+                     op, mode_label, flag_mismatches, n, first_flag_detail);
+        std::abort();
+    }
+    return n;
+}
+
 // ---- dispatch table ----------------------------------------------------
 
 int main() {
@@ -875,7 +1183,7 @@ int main() {
     run("f64_mul", run_f64_binop("f64_mul", sf64_mul, {"-tininessbefore"}));
     run("f64_div", run_f64_binop("f64_div", sf64_div, {"-tininessbefore"}));
     // IEEE-754 `remainder` (round-to-nearest-even quotient) — lands via
-    // sf64_remainder (fmod + tie-break).
+    // sf64_remainder (fmod + tie-break). Rounding mode does not apply.
     run("f64_rem", run_f64_binop("f64_rem", sf64_remainder, {"-tininessbefore"}));
     run("f64_sqrt", run_f64_unop("f64_sqrt", sf64_sqrt, {"-tininessbefore"}));
 
@@ -883,6 +1191,64 @@ int main() {
     // runtime is ~15-30s depending on machine. Pass -n explicitly so we
     // document the chosen sample size.
     run("f64_mulAdd", run_f64_mulAdd(6133248));
+
+    // ---- per-mode sf64_*_r surface --------------------------------------
+    //
+    // Re-run add/sub/mul/div/sqrt/fma/f64_to_i*/f64_to_f32 under each of
+    // the four non-RNE rounding modes (RTZ, RUP, RDN, RNA) plus a
+    // redundant RNE pass that exercises the explicit-mode entry points.
+    // TestFloat regenerates its oracle per-mode via -rnear_even /
+    // -rminMag / -rmax / -rmin / -rnear_maxMag; the runner dispatches
+    // each vector through the matching sf64_*_r(mode, ...) call.
+    //
+    // `-tininessbefore` is preserved. `f64_mulAdd` at 6.1M vectors is
+    // the slow leg here — roughly 15-30s per mode — so the total per-
+    // mode pass stays bounded at ~3 minutes on Apple Silicon. See the
+    // per-mode bit-exact MPFR sweep in `tests/mpfr/test_mpfr_diff.cpp`
+    // for an independent oracle covering the same surface.
+    //
+    // mulAdd vector count per mode: 6,133,248 (matches TestFloat's
+    // hard-coded level-1 minimum — the generator refuses smaller -n).
+    // Total mulAdd coverage across all modes: 5 * 6M = 30M vectors,
+    // ~90s added runtime on Apple Silicon.
+    for (const ModeRow& row : kModes) {
+        char label[64];
+
+        std::snprintf(label, sizeof(label), "f64_add  [%s]", row.label);
+        run(label, run_f64_binop_rmode("f64_add", sf64_add_r, row.mode, row.label, row));
+
+        std::snprintf(label, sizeof(label), "f64_sub  [%s]", row.label);
+        run(label, run_f64_binop_rmode("f64_sub", sf64_sub_r, row.mode, row.label, row));
+
+        std::snprintf(label, sizeof(label), "f64_mul  [%s]", row.label);
+        run(label, run_f64_binop_rmode("f64_mul", sf64_mul_r, row.mode, row.label, row));
+
+        std::snprintf(label, sizeof(label), "f64_div  [%s]", row.label);
+        run(label, run_f64_binop_rmode("f64_div", sf64_div_r, row.mode, row.label, row));
+
+        std::snprintf(label, sizeof(label), "f64_sqrt [%s]", row.label);
+        run(label, run_f64_unop_rmode("f64_sqrt", sf64_sqrt_r, row.mode, row.label, row));
+
+        std::snprintf(label, sizeof(label), "f64_mulAdd [%s]", row.label);
+        run(label, run_f64_mulAdd_rmode(6133248, row.mode, row.label, row));
+
+        std::snprintf(label, sizeof(label), "f64_to_i32  [%s]", row.label);
+        run(label, (run_f64_to_int_rmode<int32_t, sf64_to_i32_r>(
+                       "f64_to_i32", -2147483648.0, 2147483648.0, row.mode, row.label, row)));
+        std::snprintf(label, sizeof(label), "f64_to_i64  [%s]", row.label);
+        run(label, (run_f64_to_int_rmode<int64_t, sf64_to_i64_r>(
+                       "f64_to_i64", -9223372036854775808.0, 9223372036854775808.0, row.mode,
+                       row.label, row)));
+        std::snprintf(label, sizeof(label), "f64_to_ui32 [%s]", row.label);
+        run(label, (run_f64_to_int_rmode<uint32_t, sf64_to_u32_r>("f64_to_ui32", 0.0, 4294967296.0,
+                                                                  row.mode, row.label, row)));
+        std::snprintf(label, sizeof(label), "f64_to_ui64 [%s]", row.label);
+        run(label, (run_f64_to_int_rmode<uint64_t, sf64_to_u64_r>(
+                       "f64_to_ui64", 0.0, 18446744073709551616.0, row.mode, row.label, row)));
+
+        std::snprintf(label, sizeof(label), "f64_to_f32  [%s]", row.label);
+        run(label, run_f64_to_f32_rmode(row.mode, row.label, row));
+    }
 
     // ---- compare --------------------------------------------------------
     //
