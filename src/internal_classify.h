@@ -43,16 +43,20 @@
 
 namespace soft_fp64::internal {
 
-#define SF64_INTERNAL_INLINE                                                                       \
-    static inline __attribute__((always_inline)) __attribute__((visibility("hidden")))
+// `static inline` already gives these helpers internal linkage in every
+// TU that includes the header, so the symbols never escape the archive
+// and a separate `visibility("hidden")` is redundant. GCC -Wattributes
+// emits "visibility attribute ignored" on static functions and we run
+// with -Werror, so we drop the redundant attribute and rely on `static`
+// alone — same end-state on both compilers.
+#define SF64_INTERNAL_INLINE static inline __attribute__((always_inline))
 
 // Larger bodies (ldexp / frexp) keep `inline` only — let the compiler
 // decide whether to inline. Forcing `always_inline` inflates callers
 // like `xexp` / `xatanh` that ldexp at multiple sites with the full
 // subnormal-handling body, which costs more in icache pressure than the
-// saved call frame. The hidden-visibility attribute alone is enough to
-// keep these off the public ABI surface.
-#define SF64_INTERNAL_INLINE_LARGE static inline __attribute__((visibility("hidden")))
+// saved call frame. `static` keeps it off the ABI surface as above.
+#define SF64_INTERNAL_INLINE_LARGE static inline
 
 // ---------------------------------------------------------------------------
 // fabs / neg — pure bit ops
