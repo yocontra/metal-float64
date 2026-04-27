@@ -42,8 +42,26 @@ constexpr ModeMapping kModes[] = {
 
 struct HostFenvGuard {
     int prev;
-    explicit HostFenvGuard(int m) : prev(std::fegetround()) { std::fesetround(m); }
-    ~HostFenvGuard() { std::fesetround(prev); }
+    explicit HostFenvGuard(int m) : prev(std::fegetround()) {
+        std::fesetround(m);
+        // Hard memory barrier so the compiler cannot constant-fold the FP
+        // op below us using its default rounding mode. AppleClang on the
+        // macos-14 GitHub runner in -O2 / -O3 has been observed folding
+        // host_sub(1.0, 2^-1022) through the default RNE path (returning
+        // 1.0) instead of honoring the just-set FE_TOWARDZERO (which
+        // would return the just-below-1.0 representable). The `volatile
+        // double va = a, vb = b;` lines below already force real loads,
+        // but the FP op itself can still be precomputed by the
+        // optimizer if it doesn't see a barrier between fesetround and
+        // the op. This asm volatile is opaque to the optimizer and
+        // forces it to treat any subsequent FP behavior as
+        // mode-dependent.
+        __asm__ __volatile__("" ::: "memory");
+    }
+    ~HostFenvGuard() {
+        __asm__ __volatile__("" ::: "memory");
+        std::fesetround(prev);
+    }
 };
 
 double host_add(double a, double b, int m) {
