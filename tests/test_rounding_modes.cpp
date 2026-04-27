@@ -21,6 +21,16 @@
 #include <cmath>
 #include <cstdio>
 
+// Tell the compiler that fenv state (rounding mode) matters for the FP ops
+// in this TU. Without this, both clang and GCC happily constant-fold
+// floating-point at compile time using their own (RNE) rounding model,
+// ignoring fesetround() entirely; volatile loads, asm-memory barriers, and
+// noinline attributes are all insufficient against the call-site folder.
+// Both AppleClang and GCC accept the pragma; clang may emit
+// `pragma FENV_ACCESS is not supported` as a warning, but the parser still
+// flips the relevant fp-folding flags.
+#pragma STDC FENV_ACCESS ON
+
 namespace {
 
 struct ModeMapping {
