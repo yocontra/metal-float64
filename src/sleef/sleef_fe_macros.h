@@ -79,7 +79,8 @@
 #define ddnormalize_dd_dd(...) ddnormalize_dd_dd(__VA_ARGS__, fe)
 #define dd_to_d(...) dd_to_d(__VA_ARGS__, fe)
 #define ddscale_dd_dd_d(...) ddscale_dd_dd_d(__VA_ARGS__, fe)
-// ddneg_dd_dd doesn't need fe (bit flip).
+#define ddsub_dd_dd_dd(...) ddsub_dd_dd_dd(__VA_ARGS__, fe)
+// ddneg_dd_dd / ddabs_dd_dd don't need fe (bit flip).
 
 // ---- polynomial evaluation ---------------------------------------------
 #define poly2(...) ::soft_fp64::sleef::poly2(__VA_ARGS__, fe)

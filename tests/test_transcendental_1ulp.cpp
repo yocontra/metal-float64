@@ -235,14 +235,16 @@ int main() {
     // pass their spec tier, or their problematic input range is excised
     // and exercised instead by the report-only harness in
     // tests/experimental/.
-    //   U10   — functions that land ≤1 ULP on sweep (most).
+    //   U10   — functions that land ≤1 ULP on sweep (most), including
+    //           erf / tgamma / lgamma after the post-1.1 SLEEF u1 port.
     //   U35   — functions that land ≤2 ULP (tan, sinh, tanh, asinh, pow,
-    //           *pi-suffixed inverse trig).
-    //   GAMMA — erf full range; erfc / tgamma / lgamma on zero-free,
-    //           below-saturation ranges.
+    //           *pi-suffixed inverse trig). Also gates erfc here vs host
+    //           libm because libm's own erfc ships at u15.
+    //   GAMMA — reserved (currently unused on the shipped surface).
     constexpr int64_t U10 = 4;
     constexpr int64_t U35 = 8;
     constexpr int64_t GAMMA = 1024;
+    (void)GAMMA; // currently unused — left for forward-compat / experimental.
 
     std::printf("\n[u10 sweeps]\n");
 
@@ -407,9 +409,8 @@ int main() {
         auto ref_erfc = [](double x) { return std::erfc(x); };
 
         // erf on [-5, 5] — uniform linear sweep (log-sweep is fine but we
-        // want to hit the |x|<1.5 Taylor path too). Gated at GAMMA (spec
-        // bucket for the erf/gamma family); measured worst ~180 ULP on the
-        // Taylor/Chebyshev stitch near |x| ≈ 0.9.
+        // want to hit the |x|<1.5 Taylor path too). post-1.1: SLEEF u1 port
+        // brings the worst-case down to ~3 ULP vs host libm; gated at U10.
         Stats se;
         LCG rng(0xE2FFULL);
         for (int i = 0; i < 10000; ++i) {
@@ -420,12 +421,14 @@ int main() {
         }
         std::printf("  erf           : n=%d max_ulp=%lld worst_x=%.17g\n", se.checked,
                     static_cast<long long>(se.max_ulp), se.worst_x);
-        REQUIRE_ULP(se, GAMMA);
+        REQUIRE_ULP(se, U10);
 
-        // erfc gated only on the non-deep-tail range [-5, 15] where the
-        // single-double stitching stays inside GAMMA. The deep tail
-        // (|x| > ~20) where libm's extended-precision path wins is probed
-        // report-only by tests/experimental/experimental_precision.cpp.
+        // erfc on [-5, 15]. post-1.1: SLEEF u15 port; vs MPFR @ 200 bits
+        // worst is ≤1 ULP (see tests/mpfr/test_mpfr_diff.cpp), but vs host
+        // libm — which itself ships at the u15 documented spec on macOS
+        // 14 / Apple Silicon — worst is ~5 ULP. The u15 spec is upstream
+        // SLEEF's own naming; we gate at U35 here (≤8 ULP) since the
+        // oracle (libm) is the one introducing the slack, not us.
         Stats sec;
         LCG rng2(0xEC99ULL);
         for (int i = 0; i < 10000; ++i) {
@@ -436,7 +439,7 @@ int main() {
         }
         std::printf("  erfc          : n=%d max_ulp=%lld worst_x=%.17g\n", sec.checked,
                     static_cast<long long>(sec.max_ulp), sec.worst_x);
-        REQUIRE_ULP(sec, GAMMA);
+        REQUIRE_ULP(sec, U35);
     }
 
     std::printf("\n[C.5-4: tgamma / lgamma]\n");
@@ -446,10 +449,9 @@ int main() {
         auto ref_tgamma = [](double x) { return std::tgamma(x); };
         auto ref_lgamma = [](double x) { return std::lgamma(x); };
 
-        // tgamma gated on [0.5, 20] where single-double precision holds
-        // GAMMA. The near-overflow band (x > ~20, approaching the 171.62
-        // cutoff) is probed report-only by tests/experimental/
-        // experimental_precision.cpp.
+        // tgamma on [0.5, 20]. post-1.1: SLEEF u1 port; worst ~1 ULP vs
+        // host libm. The near-overflow band (x > ~20, approaching the 171.62
+        // cutoff) is also U10 against MPFR — see test_mpfr_diff.cpp.
         Stats st;
         LCG rng(0x7A33AAULL);
         for (int i = 0; i < 10000; ++i) {
@@ -460,11 +462,13 @@ int main() {
         }
         std::printf("  tgamma        : n=%d max_ulp=%lld worst_x=%.17g\n", st.checked,
                     static_cast<long long>(st.max_ulp), st.worst_x);
-        REQUIRE_ULP(st, GAMMA);
+        REQUIRE_ULP(st, U10);
 
-        // lgamma gated on x ≥ 3 (zero-free subrange). The zero-crossings at
-        // x=1 and x=2 plus the deep tail are probed report-only by
-        // tests/experimental/experimental_precision.cpp.
+        // lgamma gated on x ≥ 3 (zero-free subrange). post-1.1: SLEEF u1
+        // port; worst ~3 ULP vs host libm. The zero-crossings at x=1, x=2
+        // remain U10-tight against MPFR (see experimental_precision.cpp
+        // — currently report-only) but the ULP ratio is undefined as
+        // |lgamma| → 0, so the gated sweep stays on the zero-free range.
         Stats sl;
         LCG rng2(0x1DEFFULL);
         for (int i = 0; i < 10000; ++i) {
@@ -477,7 +481,7 @@ int main() {
         }
         std::printf("  lgamma        : n=%d max_ulp=%lld worst_x=%.17g\n", sl.checked,
                     static_cast<long long>(sl.max_ulp), sl.worst_x);
-        REQUIRE_ULP(sl, GAMMA);
+        REQUIRE_ULP(sl, U10);
 
         // lgamma_r spot check — sign output on x = -0.5 should be -1
         // (since gamma(-0.5) = -2√π < 0).

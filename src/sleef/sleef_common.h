@@ -318,6 +318,19 @@ SF64_ALWAYS_INLINE DD ddneg_dd_dd(DD a) noexcept {
     return DD{neg(a.hi), neg(a.lo)};
 }
 
+// |DD| — sign flip when hi is negative (lo follows). Bit-flip on the sign
+// bits, no arithmetic. Mirrors SLEEF 3.6 `ddabs_d2_d2`.
+SF64_ALWAYS_INLINE DD ddabs_dd_dd(DD a) noexcept {
+    return signbit_(a.hi) ? DD{neg(a.hi), neg(a.lo)} : a;
+}
+
+// DD subtraction without |a|>=|b| precondition — equivalent to `ddadd2(a,
+// -b)`. Mirrors SLEEF 3.6 `ddsub_d2_d2_d2` which is also used by the
+// erfc_u15 reconstruction step.
+SF64_ALWAYS_INLINE DD ddsub_dd_dd_dd(DD a, DD b, sf64_internal_fe_acc& fe) noexcept {
+    return ddadd2_dd_dd(a, ddneg_dd_dd(b), fe);
+}
+
 // ---- DD helpers with "|a| >= |b|" precondition (fast TwoSum) ----------
 // These live in sleef_common.h (not anonymous-ns file-local to trig) so
 // sleef_fe_macros.h can append `, fe` uniformly across consumer TUs. The

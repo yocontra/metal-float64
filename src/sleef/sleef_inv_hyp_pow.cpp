@@ -335,6 +335,103 @@ namespace soft_fp64::sleef {
     return sf64_ldexp(yy, q);
 }
 
+// exp(DD) → DD. Port of SLEEF 3.6 sleefdp.c::expk2 (the DD-result form
+// used by xtgamma_u1 reconstruction and xerfc_u15 deep-tail). Same
+// reduction as expk_dd above (q = round((d.hi+d.lo)*log2(e)); s = d - q·ln2)
+// but the final ldexp is applied componentwise to keep the result in DD.
+//
+// Hidden visibility — used by sleef_stubs.cpp's gamma/erfc ports, never
+// part of the public ABI. The deep-underflow guard (`d.x < -1000 ⇒ 0`)
+// matches upstream so the caller's expk2(d)·u multiplication doesn't
+// produce a denormal trail.
+[[gnu::visibility("hidden")]] DD sf64_internal_expk2_dd(DD d, sf64_internal_fe_acc& fe) {
+    const double d_collapsed = sf64_add(d.hi, d.lo);
+    const double qf = sf64_rint(sf64_mul(d_collapsed, kR_LN2));
+    const int q = sf64_to_i32(qf);
+
+    DD s = ddadd2_dd_dd_d(d, sf64_mul(qf, sf64_neg(kL2U)));
+    s = ddadd2_dd_dd_d(s, sf64_mul(qf, sf64_neg(kL2L)));
+
+    // SLEEF 3.6 expk2 10-term tail polynomial — Horner in s.hi (= s.x).
+    // (The polynomial degree differs from expk_dd: expk2 carries the full
+    // 10 terms whereas expk_dd lifts the leading three terms into the DD
+    // reconstruction. expk2 keeps everything inside the DD reconstruction.)
+    double u = +0.1602472219709932072e-9;
+    u = sf64_fma(u, s.hi, +0.2092255183563157007e-8);
+    u = sf64_fma(u, s.hi, +0.2505230023782644465e-7);
+    u = sf64_fma(u, s.hi, +0.2755724800902135303e-6);
+    u = sf64_fma(u, s.hi, +0.2755731892386044373e-5);
+    u = sf64_fma(u, s.hi, +0.2480158735605815065e-4);
+    u = sf64_fma(u, s.hi, +0.1984126984148071858e-3);
+    u = sf64_fma(u, s.hi, +0.1388888888886763255e-2);
+    u = sf64_fma(u, s.hi, +0.8333333333333347095e-2);
+    u = sf64_fma(u, s.hi, +0.4166666666666669905e-1);
+
+    DD t = ddadd2_dd_dd_d(ddmul_dd_dd_d(s, u), +0.1666666666666666574e+0);
+    t = ddadd2_dd_dd_d(ddmul_dd_dd_dd(s, t), 0.5);
+    t = ddadd2_dd_dd(s, ddmul_dd_dd_dd(ddsqu_dd_dd(s), t));
+
+    t = ddadd2_dd_d_dd(1.0, t);
+
+    // Componentwise ldexp by 2^q. sf64_ldexp scales by 2^q exactly when
+    // |d| stays in normal range; the subsequent ldexp on t.lo can produce
+    // a denormal which is what we want — it gets absorbed in the consumer's
+    // collapse.
+    t.hi = sf64_ldexp(t.hi, q);
+    t.lo = sf64_ldexp(t.lo, q);
+
+    return lt_(d.hi, -1000.0) ? DD{0.0, 0.0} : t;
+}
+
+// log(DD) → DD. Port of SLEEF 3.6 sleefdp.c::logk2 (lgamma_u1 calls it on
+// the absolute value of the Lanczos quotient).
+//
+// Reduction: e = ilogb(d.hi * 4/3); m = d / 2^e; x = (m-1)/(m+1).
+//   log(d) = e·log(2) + 2x·(1 + x²·P(x²))
+// Polynomial is degree-7 in x²; the lead term is reconstructed in DD as
+// 2x + 2x·x²·P, then `e·ln2` is added with a DD ln2 split.
+//
+// Uses sf64_frexp/ldexp_2k to keep the scaling FPU-free.
+[[gnu::visibility("hidden")]] DD sf64_internal_logk2_dd(DD d, sf64_internal_fe_acc& fe) {
+    // SLEEF: e = ilogbk(d.x * (1.0/0.75)). We approximate with frexp on the
+    // shifted value: frexp returns (m, e) with |m| ∈ [0.5, 1). For the SLEEF
+    // form we want e such that d.hi/2^e ∈ [0.75, 1.5) approximately. The
+    // (1.0/0.75) shift turns this into [1, 2), and ilogb extracts the unbiased
+    // exponent. frexp gives us m·2^e in [0.5, 1) range, so we adjust by 1.
+    int e_frexp;
+    (void)sf64_frexp(sf64_mul(d.hi, 1.0 / 0.75), &e_frexp);
+    const int e = e_frexp - 1; // ilogb = frexp_e - 1
+
+    // m = d / 2^e (componentwise); ldexp by -e is exact.
+    DD m;
+    m.hi = sf64_ldexp(d.hi, -e);
+    m.lo = sf64_ldexp(d.lo, -e);
+
+    DD x = dddiv_dd_dd_dd(ddadd2_dd_dd_d(m, -1.0), ddadd2_dd_dd_d(m, 1.0));
+    DD x2 = ddsqu_dd_dd(x);
+
+    // SLEEF 3.6 logk2 7-term polynomial in x² (Horner in x2.hi).
+    constexpr double kLogk2Coef[] = {
+        0.13860436390467167910856,  0.131699838841615374240845, 0.153914168346271945653214,
+        0.181816523941564611721589, 0.22222224632662035403996,  0.285714285511134091777308,
+        0.400000000000914013309483,
+    };
+    constexpr int kLogk2N = sizeof(kLogk2Coef) / sizeof(kLogk2Coef[0]);
+    double t = kLogk2Coef[0];
+    for (int i = 1; i < kLogk2N; ++i) {
+        t = sf64_fma(t, x2.hi, kLogk2Coef[i]);
+    }
+    t = sf64_fma(t, x2.hi, 0.666666666666664853302393);
+
+    // s = ln2 · e (DD), + 2x, + x³·t (where x³ = x·x²)
+    DD s = ddmul_dd_dd_d(DD{0.693147180559945286226764, 2.319046813846299558417771e-17},
+                         sf64_from_i32(e));
+    s = ddadd_dd_dd_dd(s, ddscale_dd_dd_d(x, 2.0));
+    s = ddadd_dd_dd_dd(s, ddmul_dd_dd_d(ddmul_dd_dd_dd(x2, x), t));
+
+    return s;
+}
+
 } // namespace soft_fp64::sleef
 
 // ========================================================================

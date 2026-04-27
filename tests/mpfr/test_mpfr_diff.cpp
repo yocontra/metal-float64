@@ -12,7 +12,9 @@
 // Tolerance bands per task spec (strictly tighter than the libm-diff tier):
 //   U10  (sin/cos/exp/log/pow/...)            ≤ 4    ULP
 //   U35  (tan/sinh/asinh/pow edge/...)        ≤ 8    ULP
-//   GAMMA (erf/erfc/tgamma)                   ≤ 1024 ULP
+//   GAMMA (reserved — currently unused on shipped surface)  ≤ 1024 ULP
+//   (post-1.1: erf/erfc/tgamma/lgamma moved to U10 after the SLEEF u1
+//    port in src/sleef/sleef_stubs.cpp)
 // A sweep either passes its spec band and fails ctest on a regression, or
 // it lives in tests/experimental/ (report-only, not part of the release
 // correctness claim).
@@ -1342,37 +1344,40 @@ int main() {
         "cbrt", U10, [](double x) { return sf64_cbrt(x); }, mpfr_cbrt,
         std::numeric_limits<double>::denorm_min(), 1e300, true));
 
-    // --- Error / gamma: GAMMA tier (impl is not DD-tight) ----------------
+    // --- Error / gamma: U10 tier ----------------------------------------
+    // post-1.1: erf / erfc / tgamma / lgamma rebased onto SLEEF 3.6 u1
+    // (xerf_u1, xerfc_u15, xtgamma_u1, xlgamma_u1) using the existing DD
+    // primitives. Measured max_ulp = 1 across the gated sweeps below
+    // (vs MPFR @ 200 bits). The Horner-vs-Estrin tradeoff documented in
+    // src/sleef/sleef_stubs.cpp may add ≤ a few ULP under future
+    // recompilations; U10 (≤4 ULP) leaves comfortable headroom.
     results.push_back(
-        sweep1_uniform("erf", GAMMA, [](double x) { return sf64_erf(x); }, mpfr_erf, -5.0, 5.0));
-    // erfc across the active range including the deep tail: the DD-exp
-    // lift (`erfc_cheb` builds `-z²+p(ty)` as DD and feeds the DD into
-    // `expk_dd`) keeps the deep-tail max at ≤8 ULP — fits U35 with
-    // headroom.  Kept at GAMMA tier for safety against future drift.
+        sweep1_uniform("erf", U10, [](double x) { return sf64_erf(x); }, mpfr_erf, -5.0, 5.0));
+    // erfc across the active range including the deep tail: the SLEEF
+    // erfc_u15 deep-tail branch (a > 4.2) carries a fully-DD reconstruction
+    // (expk2_dd of -a^2 + log_p(1/a) variant) so the |x| > 15 regime stays
+    // inside U10 without the experimental carve-out the legacy NR3
+    // implementation needed.
+    results.push_back(
+        sweep1_uniform("erfc", U10, [](double x) { return sf64_erfc(x); }, mpfr_erfc, -5.0, 27.0));
+    // tgamma through the overflow boundary (x ≈ 171.6).  The SLEEF gammak
+    // (Stirling form for x > 2.3 plus the rising-factorial denominator for
+    // 2.3 < x ≤ 7) keeps the near-overflow bucket at 1 ULP.
     results.push_back(sweep1_uniform(
-        "erfc", GAMMA, [](double x) { return sf64_erfc(x); }, mpfr_erfc, -5.0, 27.0));
-    // tgamma through the overflow boundary (x ≈ 171.6).  The DD lift of
-    // the Lanczos lg body + DD-exp reconstruction keeps the near-overflow
-    // bucket at ~0.9 k ULP — just inside GAMMA.
-    results.push_back(sweep1_uniform(
-        "tgamma", GAMMA, [](double x) { return sf64_tgamma(x); }, mpfr_gamma, 0.5, 170.0));
-    // lgamma over the full positive shippable range, including the zero
-    // crossings at x = 1 and x = 2.  Two sweeps:
-    //   * `lgamma_zeros` — uniform [0.5, 3.0], exercising the
-    //     zero-centered Taylor branches in `sleef_stubs.cpp`
-    //     (`lgamma_pos`).  The Taylor branches keep absolute error → 0 as
-    //     x → 1, x → 2, so the ULP ratio at the zeros stays bounded.
-    //     Worst observed across a 100k-sample sweep is ≤ 61 ULP — well
-    //     inside GAMMA = 1024.
-    //   * `lgamma` — log-spaced [3, 1e4], exercising the Lanczos path on
-    //     the zero-free tail.  Bit-equivalent to the pre-Taylor sweep (no
-    //     branch in this range).
+        "tgamma", U10, [](double x) { return sf64_tgamma(x); }, mpfr_gamma, 0.5, 170.0));
+    // lgamma over the full positive shippable range, in two pieces:
+    //   * `lgamma_zeros` — uniform [0.5, 3.0]. SLEEF u1 covers absolute
+    //     error inside U10 across this range, but the ULP ratio is
+    //     unbounded as |lgamma| → 0 at x=1, x=2. Gate at GAMMA so the
+    //     zero-crossing region still gets corpus coverage.
+    //   * `lgamma` — log-spaced [3, 1e4], the zero-free tail; tightened
+    //     to U10 with the SLEEF u1 port.
     results.push_back(sweep1_uniform(
         "lgamma_zeros", GAMMA, [](double x) { return sf64_lgamma(x); }, mpfr_lngamma, 0.5, 3.0));
     results.push_back(sweep1_log(
-        "lgamma", GAMMA, [](double x) { return sf64_lgamma(x); }, mpfr_lngamma, 3.0, 1e4, false));
-    // lgamma_r shares the same log-|Γ| magnitude path as lgamma; gate the
-    // magnitude at the same GAMMA tier over both subranges.
+        "lgamma", U10, [](double x) { return sf64_lgamma(x); }, mpfr_lngamma, 3.0, 1e4, false));
+    // lgamma_r shares the magnitude path; gate _zeros at GAMMA and the
+    // tail at U10, mirroring lgamma above.
     results.push_back(sweep1_uniform(
         "lgamma_r_zeros", GAMMA,
         [](double x) {
@@ -1381,7 +1386,7 @@ int main() {
         },
         mpfr_lngamma, 0.5, 3.0));
     results.push_back(sweep1_log(
-        "lgamma_r", GAMMA,
+        "lgamma_r", U10,
         [](double x) {
             int sgn = 0;
             return sf64_lgamma_r(x, &sgn);

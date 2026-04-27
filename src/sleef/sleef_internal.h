@@ -103,4 +103,24 @@ namespace soft_fp64::sleef {
 [[gnu::visibility("hidden")]] DD sf64_internal_logk_dd(double d, sf64_internal_fe_acc& fe);
 [[gnu::visibility("hidden")]] double sf64_internal_expk_dd(DD d, sf64_internal_fe_acc& fe);
 
+// DD-returning variants used by the SLEEF 3.6 `xerf_u1`, `xerfc_u15`,
+// `xtgamma_u1`, `xlgamma_u1` ports in `sleef_stubs.cpp`.
+//
+// `expk2_dd(d)` = exp(d) carried as DD (target ≈ 2^-106 relative). The
+// erfc_u15 deep-tail and tgamma_u1 reconstruction both need exp(arg)
+// preserved to DD precision before the final round.
+//
+// `logk2_dd(d)` = log(d) where d is a DD argument and the result is DD.
+// Used by lgamma_u1 to evaluate log of the Lanczos numerator/denominator
+// quotient at full DD width.
+//
+// `sinpik_dd(d)` = sinπ(d) carried as DD. Used by the gammak reflection
+// branch (x < 0.5) so the π-scaled sine of the reduced argument retains
+// DD precision through the multiplication with the denominator sweep.
+//
+// All three are hidden-visibility — they are NOT public ABI.
+[[gnu::visibility("hidden")]] DD sf64_internal_expk2_dd(DD d, sf64_internal_fe_acc& fe);
+[[gnu::visibility("hidden")]] DD sf64_internal_logk2_dd(DD d, sf64_internal_fe_acc& fe);
+[[gnu::visibility("hidden")]] DD sf64_internal_sinpik_dd(double d, sf64_internal_fe_acc& fe);
+
 } // namespace soft_fp64::sleef
