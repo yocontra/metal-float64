@@ -68,12 +68,22 @@
 namespace soft_fp64::internal {
 
 #if SOFT_FP64_FENV_MODE == 1
-// Thread-local flag accumulator. Defined in src/fenv.cpp. Hidden visibility
-// keeps the TLS wrapper symbol off the shipped ABI surface (cf. CLAUDE.md
-// §Hard constraints: cross-TU internals carry `sf64_internal_` + the
-// explicit hidden-visibility attribute, matching src/sleef/sleef_internal.h).
+// Thread-local flag accumulator. Hidden visibility keeps the TLS wrapper
+// symbol off the shipped ABI surface (cf. CLAUDE.md §Hard constraints:
+// cross-TU internals carry `sf64_internal_` + the explicit hidden-visibility
+// attribute, matching src/sleef/sleef_internal.h).
+//
+// Defined as `inline thread_local` in this header rather than `extern` +
+// out-of-line so cross-TU access sites see the constant initializer
+// directly. Without that, clang on Linux ELF emits R_X86_64_PC32
+// references to the `_ZTH...` TLS init wrapper at every access site, and
+// the wrapper is never defined in fenv.cpp.o (the constant init `= 0u`
+// suppresses wrapper emission). Result was a PIE link failure on Ubuntu
+// clang. The inline-thread_local form avoids the extern/wrapper dance
+// entirely; comdat dedupes the variable to a single per-thread slot in
+// the final image.
 [[gnu::visibility("hidden"),
-  gnu::tls_model("initial-exec")]] extern thread_local unsigned sf64_internal_fe_flags;
+  gnu::tls_model("initial-exec")]] inline thread_local unsigned sf64_internal_fe_flags = 0u;
 
 [[gnu::visibility("hidden")]] SF64_ALWAYS_INLINE void
 sf64_internal_fe_raise_bits(unsigned bits) noexcept {

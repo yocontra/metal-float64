@@ -27,18 +27,11 @@
 #include "internal_fenv.h"
 #include "soft_fp64/soft_f64.h"
 
-namespace soft_fp64::internal {
-#if SOFT_FP64_FENV_MODE == 1
-// Visibility hidden must match the extern declaration in internal_fenv.h
-// byte-for-byte, otherwise clang on Linux ELF may emit a `_ZTH...` TLS init
-// wrapper reference at cross-TU access sites that has no matching definition
-// (the constant-init `= 0u` body suppresses wrapper emission here, but the
-// reference is still emitted at the access site if visibility doesn't match).
-// PIE link then fails with "PC32 against undefined hidden symbol _ZTH...".
-[[gnu::visibility("hidden"),
-  gnu::tls_model("initial-exec")]] thread_local unsigned sf64_internal_fe_flags = 0u;
-#endif
-} // namespace soft_fp64::internal
+// sf64_internal_fe_flags is now an `inline thread_local` defined in
+// internal_fenv.h itself (C++17), not an extern declaration backed by an
+// out-of-line definition here. See the comment in internal_fenv.h for
+// rationale (Linux ELF PIE link broke on the missing _ZTH wrapper for the
+// extern shape).
 
 // ---------------------------------------------------------------------------
 // Default (TLS) surface — present in `tls` mode; under `disabled` and
