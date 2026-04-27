@@ -31,6 +31,22 @@
 // flips the relevant fp-folding flags.
 #pragma STDC FENV_ACCESS ON
 
+// Belt-and-suspenders against compile-time constant folding of the host FP
+// ops below. AppleClang on macos-14 honours the FENV_ACCESS pragma after
+// the pragma was added; GCC on ubuntu-24.04 -O3 still folds despite the
+// pragma + `-frounding-math` + the asm-memory barrier in HostFenvGuard.
+// Marking each host_* helper noinline + optnone (clang) / optimize("O0")
+// (GCC) forces the FP op to run at runtime under whatever rounding mode
+// fesetround set, with arbitrary-looking arguments the optimizer must
+// treat as opaque.
+#if defined(__clang__)
+#define HOST_FENV_NO_OPT [[clang::optnone, gnu::noinline]]
+#elif defined(__GNUC__)
+#define HOST_FENV_NO_OPT [[gnu::optimize("O0"), gnu::noinline]]
+#else
+#define HOST_FENV_NO_OPT
+#endif
+
 namespace {
 
 struct ModeMapping {
@@ -79,37 +95,37 @@ struct HostFenvGuard {
 // older AppleClang where `volatile` alone wasn't enough to defeat compile-
 // time constant-folding of e.g. 1.0 - 2^-1022 to 1.0 (the RNE result)
 // despite a fesetround(FE_TOWARDZERO) on the line above.
-[[gnu::noinline]] double host_add(double a, double b, int m) {
+HOST_FENV_NO_OPT double host_add(double a, double b, int m) {
     HostFenvGuard g(m);
     volatile double va = a, vb = b;
     return va + vb;
 }
-[[gnu::noinline]] double host_sub(double a, double b, int m) {
+HOST_FENV_NO_OPT double host_sub(double a, double b, int m) {
     HostFenvGuard g(m);
     volatile double va = a, vb = b;
     return va - vb;
 }
-[[gnu::noinline]] double host_mul(double a, double b, int m) {
+HOST_FENV_NO_OPT double host_mul(double a, double b, int m) {
     HostFenvGuard g(m);
     volatile double va = a, vb = b;
     return va * vb;
 }
-[[gnu::noinline]] double host_div(double a, double b, int m) {
+HOST_FENV_NO_OPT double host_div(double a, double b, int m) {
     HostFenvGuard g(m);
     volatile double va = a, vb = b;
     return va / vb;
 }
-[[gnu::noinline]] double host_sqrt(double a, int m) {
+HOST_FENV_NO_OPT double host_sqrt(double a, int m) {
     HostFenvGuard g(m);
     volatile double va = a;
     return std::sqrt(va);
 }
-[[gnu::noinline]] double host_fma(double a, double b, double c, int m) {
+HOST_FENV_NO_OPT double host_fma(double a, double b, double c, int m) {
     HostFenvGuard g(m);
     volatile double va = a, vb = b, vc = c;
     return std::fma(va, vb, vc);
 }
-[[gnu::noinline]] float host_to_f32(double x, int m) {
+HOST_FENV_NO_OPT float host_to_f32(double x, int m) {
     HostFenvGuard g(m);
     volatile double vx = x;
     return static_cast<float>(vx);
