@@ -146,6 +146,50 @@ jobs:
         run: ctest --test-dir build-fenv-off -V --output-on-failure
 
   # ---------------------------------------------------------------------------
+  # 1c. Portable 64x64->128 multiply build + ctest.
+  #
+  # `sf64_fma` forms a 53x53 -> 106-bit product via the `mul64x64_to_128`
+  # primitive in src/internal.h. By default that primitive uses the
+  # compiler's native `__uint128_t`; defining `SF64_FORCE_PORTABLE_U128`
+  # forces the schoolbook fallback (four 32x32 -> 64 partial products,
+  # carry-propagated to the high/low 64-bit halves) instead. This cell
+  # keeps the portable path linked, exercised, and bit-for-bit identical
+  # to the native path against the full ctest tree (TestFloat fma vectors
+  # and MPFR transcendental sweeps both transit `sf64_fma`, so any
+  # divergence surfaces here at vector granularity).
+  #
+  # Ubuntu 24.04 + clang Release is enough — the multiply primitive is
+  # architecture-independent integer code, so one cell suffices.
+  # ---------------------------------------------------------------------------
+  build-test-portable-u128:
+    name: build-test (portable u128 mul)
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpfr-dev libgmp-dev
+
+      - name: Configure (portable u128 mul)
+        run: |
+          cmake -B build-portable-u128 -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_FLAGS=-DSF64_FORCE_PORTABLE_U128=1
+
+      - name: Build
+        run: cmake --build build-portable-u128 --parallel
+
+      - name: Test
+        run: ctest --test-dir build-portable-u128 -V --output-on-failure
+
+  # ---------------------------------------------------------------------------
   # 2. ASan + UBSan (single config — no threading, so no TSan; MSan deferred).
   # ---------------------------------------------------------------------------
   sanitizers:

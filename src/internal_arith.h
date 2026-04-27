@@ -744,7 +744,13 @@ SF64_ALWAYS_INLINE double sf64_internal_fma_rne(double a, double b, double c,
     int64_t expb;
     normalise(eb, fb, mb, expb);
 
-    const __uint128_t prod = (__uint128_t)ma * (__uint128_t)mb;
+    // Route the 53x53 -> 106-bit product through the portable-aware
+    // mul64x64_to_128 primitive in internal.h. See the comment in
+    // src/sqrt_fma.cpp's fma_r_impl for the gating rationale; both paths
+    // produce the identical 128-bit product by construction.
+    const U128Pair prod_pair = mul64x64_to_128(ma, mb);
+    const __uint128_t prod =
+        (static_cast<__uint128_t>(prod_pair.hi) << 64) | static_cast<__uint128_t>(prod_pair.lo);
     int64_t prod_exp = expa + expb - 104;
 
     if (is_zero_bits(bc)) {

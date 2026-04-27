@@ -131,6 +131,84 @@ SF64_ALWAYS_INLINE int clz32(uint32_t x) noexcept {
     return x == 0 ? 32 : __builtin_clz(x);
 }
 
+// ---- 64x64 -> 128 unsigned multiply -------------------------------------
+//
+// Returned as the (hi, lo) halves of the 128-bit product. Used by `sf64_fma`
+// to form the exact 53x53 -> 106-bit product before alignment.
+//
+// Two implementations:
+//   - `__uint128_t` native multiply (default; fast path on every toolchain
+//     that defines `__SIZEOF_INT128__` — gcc, clang, AppleClang).
+//   - portable schoolbook of four 32x32 -> 64 partial products, carry-
+//     propagated to the high/low 64-bit halves. Mirrors Berkeley SoftFloat
+//     `s_mul64To128.c` (BSD-3-Clause) line for line.
+//
+// Selection gate:
+//   - `SF64_FORCE_PORTABLE_U128` (CMake/define) forces the portable path
+//     even when `__uint128_t` is available — used by the dedicated CI cell
+//     so the schoolbook code stays linked, exercised, and bit-for-bit
+//     identical to the native path.
+//   - Otherwise, `__SIZEOF_INT128__` selects native; absence selects
+//     portable (MSVC, some wasm32 toolchains, 32-bit MCU SDKs).
+//
+// Bit-exactness: the two paths compute the identical 128-bit product by
+// construction. The CI cell that defines `SF64_FORCE_PORTABLE_U128`
+// re-runs the full ctest tree — TestFloat fma vectors and the MPFR
+// transcendental sweeps both transit `sf64_fma`, so any divergence between
+// the paths surfaces at vector granularity.
+struct U128Pair {
+    uint64_t hi;
+    uint64_t lo;
+};
+
+#if defined(__SIZEOF_INT128__) && !defined(SF64_FORCE_PORTABLE_U128)
+SF64_ALWAYS_INLINE U128Pair mul64x64_to_128(uint64_t a, uint64_t b) noexcept {
+    const __uint128_t p = static_cast<__uint128_t>(a) * static_cast<__uint128_t>(b);
+    U128Pair r;
+    r.hi = static_cast<uint64_t>(p >> 64);
+    r.lo = static_cast<uint64_t>(p);
+    return r;
+}
+#else
+// Portable schoolbook 64x64 -> 128. Splits each operand into 32-bit halves
+// and accumulates four 64-bit partial products, propagating carries through
+// the middle column. Reference: Berkeley SoftFloat 3e `s_mul64To128.c`.
+SF64_ALWAYS_INLINE U128Pair mul64x64_to_128(uint64_t a, uint64_t b) noexcept {
+    const uint32_t a_lo = static_cast<uint32_t>(a);
+    const uint32_t a_hi = static_cast<uint32_t>(a >> 32);
+    const uint32_t b_lo = static_cast<uint32_t>(b);
+    const uint32_t b_hi = static_cast<uint32_t>(b >> 32);
+
+    // Four 32x32 -> 64 partial products.
+    const uint64_t ll = static_cast<uint64_t>(a_lo) * static_cast<uint64_t>(b_lo);
+    const uint64_t hl = static_cast<uint64_t>(a_hi) * static_cast<uint64_t>(b_lo);
+    const uint64_t lh = static_cast<uint64_t>(a_lo) * static_cast<uint64_t>(b_hi);
+    const uint64_t hh = static_cast<uint64_t>(a_hi) * static_cast<uint64_t>(b_hi);
+
+    // Combine the two middle 64-bit products. SoftFloat detects the wraparound
+    // by comparing the sum to one of the operands; equivalent to extracting
+    // the carry-out of the unsigned add.
+    const uint64_t mid = hl + lh;
+    const uint64_t mid_carry = (mid < hl) ? (uint64_t{1} << 32) : 0u;
+
+    // High 64 bits = hh + carry_from_middle_column + middle_high_half.
+    uint64_t hi = hh + mid_carry + (mid >> 32);
+
+    // Low 64 bits = ll + middle_low_half_shifted_into_low.
+    const uint64_t mid_lo = mid << 32;
+    const uint64_t lo = ll + mid_lo;
+    if (lo < mid_lo) {
+        // Carry out of the low-half add propagates into hi.
+        hi += 1u;
+    }
+
+    U128Pair r;
+    r.hi = hi;
+    r.lo = lo;
+    return r;
+}
+#endif
+
 // ---- canonical result builders ------------------------------------------
 
 SF64_ALWAYS_INLINE double make_signed_zero(uint32_t sign) noexcept {

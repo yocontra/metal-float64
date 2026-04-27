@@ -632,9 +632,15 @@ SF64_ALWAYS_INLINE double fma_r_impl(double a, double b, double c, sf64_rounding
 
     // Product: ma (53 bits, MSB at 52) * mb (53 bits, MSB at 52) = up to
     // 106-bit result with MSB at bit 104 or 105.
-    // SAFETY: __uint128_t multiplication on two 53-bit values never overflows
-    // 128 bits; it fits comfortably in 106.
-    const __uint128_t prod = (__uint128_t)ma * (__uint128_t)mb;
+    //
+    // Routed through the `mul64x64_to_128` primitive in internal.h so the
+    // portable schoolbook fallback (used when __uint128_t is unavailable —
+    // MSVC, some wasm32 toolchains, 32-bit MCUs — or when
+    // SF64_FORCE_PORTABLE_U128 is set for the CI cell that exercises it)
+    // computes the same 128-bit product as the native __uint128_t path.
+    const U128Pair prod_pair = mul64x64_to_128(ma, mb);
+    const __uint128_t prod =
+        (static_cast<__uint128_t>(prod_pair.hi) << 64) | static_cast<__uint128_t>(prod_pair.lo);
     // `prod` has MSB at bit 104 or 105 depending on whether (ma*mb)'s high
     // bit carried. Compute its true exponent.
     // Exponent of the integer product: expa + expb - 104 (if MSB at 104)
