@@ -461,8 +461,204 @@ DD lgamma_dd(double x, soft_fp64::sleef::sf64_internal_fe_acc& fe) {
     return lg_dd;
 }
 
-// log|gamma(x)| for x >= 0.5, via Lanczos.
+// ---- Zero-centered Taylor expansion of log Γ(x) -----------------------
+//
+// Near the zeros at x = 1 and x = 2, the Lanczos formula produces a
+// DD-accurate `lgamma_dd` whose final `dd_to_d` collapse leaks O(ulp(1)) ≈
+// 2.2e-16 absolute noise into a result that vanishes there.  ULP-against-
+// near-zero blows past GAMMA = 1024 even with perfect ingredients — the
+// fix has to be algorithmic, not ingredient-precision.
+//
+// Series source: DLMF §5.7 (https://dlmf.nist.gov/5.7#E3) and Wolfram
+// MathWorld "Log Gamma Function" — both give
+//
+//   log Γ(1+z) = -γ z + Σ_{k=2}^∞ (-1)^k ζ(k) z^k / k    (|z| < 1)
+//
+// Around x = 2, Γ(2+z) = (1+z) Γ(1+z) so log Γ(2+z) = log(1+z) +
+// log Γ(1+z), giving
+//
+//   log Γ(2+z) = (1-γ) z + Σ_{k=2}^∞ (-1)^k (ζ(k)-1) z^k / k    (|z| < 2)
+//
+// The (ζ(k) - 1) factor decays geometrically as 2^-k so the around-2
+// series converges much faster than the around-1 series at the same |z|.
+//
+// Coefficients:
+//   * Computed offline via mpmath at 300-bit precision, then split into
+//     IEEE-754 (hi, lo) doubles so the leading terms — which dominate the
+//     near-zero result — carry full DD precision into the Horner sum.
+//   * The C reference is Boost.Math `lgamma_small_imp` (boost/math/
+//     special_functions/detail/lgamma_small.hpp), which uses the same
+//     two-pivot Taylor structure with a different polynomial form
+//     (rational approximation at higher order); we use the bare zeta-
+//     series here because it is bit-stable and the windows are narrow.
+//
+// Window selection: empirically (at this term count, evaluating each step
+// in DD), |z| ≤ 0.25 keeps the around-1 sweep at ≤ 50 ULP vs MPFR; |z| ≤
+// 0.5 keeps the around-2 sweep at ≤ 60 ULP.  Outside those windows the
+// Lanczos path fits GAMMA cleanly because we are no longer near a zero.
+//
+// `N_TERMS = 22` gives a tail bound of ζ(22)/22 · 0.25^22 ≈ 2.5e-15
+// (around 1) and ζ(22)·0.5^22 ≈ 2.6e-15 (around 2) — well below the
+// GAMMA absolute-error budget at the window edges (lgamma at the edges
+// is O(0.1), so 1024·ulp(0.1) ≈ 1.4e-14).
+
+namespace {
+
+constexpr int kLgammaTaylorN = 22;
+
+// Around x = 1: c[1] = -γ; c[k] = (-1)^k · ζ(k) / k for 2 ≤ k ≤ 22.
+// Each entry is (hi, lo) — the high part rounded-to-nearest, the low part
+// the residual rounded-to-nearest.  Source: mpmath 300-bit.
+constexpr double kLgammaT1_hi[kLgammaTaylorN + 1] = {
+    0.0, // index 0 unused
+    -0.5772156649015329,
+    0.8224670334241132,
+    -0.40068563438653143,
+    0.27058080842778454,
+    -0.20738555102867398,
+    0.1695571769974082,
+    -0.1440498967688461,
+    0.12550966952474304,
+    -0.11133426586956469,
+    0.1000994575127818,
+    -0.09095401714582904,
+    0.083353840546109,
+    -0.0769325164113522,
+    0.07143294629536133,
+    -0.06666870588242046,
+    0.06250095514121304,
+    -0.058823978658684585,
+    0.055555767627403614,
+    -0.05263167937961666,
+    0.05000004769810169,
+    -0.047619070330142226,
+    0.04545455629320467,
+};
+constexpr double kLgammaT1_lo[kLgammaTaylorN + 1] = {
+    0.0,
+    4.942915152430645e-18,
+    1.520336175199238e-17,
+    2.250747042487504e-18,
+    1.1871280107138412e-17,
+    -4.099767328621813e-18,
+    2.2393851330167238e-18,
+    -9.623140085232555e-18,
+    -2.5214685384672305e-18,
+    -4.643990572582924e-18,
+    2.6102404859583283e-18,
+    -8.306705457691885e-19,
+    2.963832603652642e-19,
+    3.2900356019181198e-18,
+    6.278806024191499e-18,
+    -3.2295860759966306e-18,
+    2.551099464019315e-18,
+    2.6912901341966357e-18,
+    -3.0261864849830964e-18,
+    -2.523843702471215e-18,
+    2.7894418264458796e-19,
+    -2.4796342684293355e-18,
+    4.382931774550076e-19,
+};
+
+// Around x = 2: c[1] = 1 - γ; c[k] = (-1)^k · (ζ(k) - 1) / k for 2 ≤ k ≤ 22.
+constexpr double kLgammaT2_hi[kLgammaTaylorN + 1] = {
+    0.0,
+    0.42278433509846713,
+    0.3224670334241132,
+    -0.0673523010531981,
+    0.020580808427784546,
+    -0.007385551028673986,
+    0.0028905103307415234,
+    -0.001192753911703261,
+    0.0005096695247430425,
+    -0.00022315475845357939,
+    9.945751278180853e-05,
+    -4.492623673813314e-05,
+    2.050721277567069e-05,
+    -9.439488275268397e-06,
+    4.374866789907488e-06,
+    -2.039215753801366e-06,
+    9.55141213040742e-07,
+    -4.492469198764566e-07,
+    2.1207184805554665e-07,
+    -1.0043224823968099e-07,
+    4.7698101693639804e-08,
+    -2.2711094608943164e-08,
+    1.0838659214896955e-08,
+};
+constexpr double kLgammaT2_lo[kLgammaTaylorN + 1] = {
+    0.0,
+    4.942915152430645e-18,
+    1.520336175199238e-17,
+    6.87667631175899e-18,
+    1.4629392512775695e-18,
+    4.1051370891788617e-19,
+    -7.357950161901912e-20,
+    4.1747852352514e-20,
+    -2.780354175057013e-20,
+    6.032078299350848e-21,
+    2.734261130690314e-21,
+    3.4577848248512954e-22,
+    4.864174577619616e-22,
+    8.111985879973243e-22,
+    -3.7021851137962053e-22,
+    -4.70891370095011e-23,
+    4.798512617588967e-23,
+    1.4219340578032317e-23,
+    1.2243193613787666e-23,
+    -5.246728062732248e-24,
+    1.6747349659198183e-24,
+    -1.406065812811299e-24,
+    -5.018242148804151e-25,
+};
+
+// Evaluate P(z) = Σ_{k=1..N} c[k] z^k via DD Horner.
+//
+//   Q(z) = c[N] + c[N-1] z + … + c[1] z^{N-1}
+//   P(z) = z · Q(z)
+//
+// Each Horner step is `acc = acc * z + c[k]` carried in DD: `ddmul_dd_dd_d`
+// preserves DD precision through the multiply, `ddadd2_dd_dd` (with the
+// coefficient lifted to DD via its hi/lo split) preserves it through the
+// add.  Result is collapsed once at the end.
+double lgamma_taylor(double z, const double* c_hi, const double* c_lo,
+                     soft_fp64::sleef::sf64_internal_fe_acc& fe) {
+    DD acc{c_hi[kLgammaTaylorN], c_lo[kLgammaTaylorN]};
+    for (int k = kLgammaTaylorN - 1; k >= 1; --k) {
+        acc = ddmul_dd_dd_d(acc, z);
+        const DD ck{c_hi[k], c_lo[k]};
+        acc = ddadd2_dd_dd(acc, ck);
+    }
+    // Final factor of z (exact DD multiply).
+    acc = ddmul_dd_dd_d(acc, z);
+    return dd_to_d(acc);
+}
+
+} // namespace
+
+// log|Γ(x)| for x ≥ 0.5.
+//
+// Branch structure:
+//   * |x - 1| ≤ 0.25 → Taylor around x = 1 (vanishing regime at x = 1)
+//   * |x - 2| ≤ 0.5  → Taylor around x = 2 (vanishing regime at x = 2)
+//   * else            → existing Lanczos path
+//
+// Outside the two Taylor windows, the result of Γ is well-conditioned (no
+// near-zero ULP blow-up) and Lanczos lands inside GAMMA = 1024.  Inside
+// the windows, the Taylor branch evaluates the residual `lgamma(x) − 0`
+// directly so absolute error → 0 as x → 1 or x → 2 — exactly the property
+// the Lanczos `dd_to_d(lgamma_dd)` collapse cannot deliver.
 double lgamma_pos(double x, soft_fp64::sleef::sf64_internal_fe_acc& fe) {
+    // |x - 1| ≤ 0.25 ⇔ x ∈ [0.75, 1.25].  Closed window at the boundary.
+    const double z1 = sf64_sub(x, 1.0);
+    if (le_(sf64_fabs(z1), 0.25)) {
+        return lgamma_taylor(z1, kLgammaT1_hi, kLgammaT1_lo, fe);
+    }
+    // |x - 2| ≤ 0.5 ⇔ x ∈ [1.5, 2.5].
+    const double z2 = sf64_sub(x, 2.0);
+    if (le_(sf64_fabs(z2), 0.5)) {
+        return lgamma_taylor(z2, kLgammaT2_hi, kLgammaT2_lo, fe);
+    }
     return dd_to_d(lgamma_dd(x, fe));
 }
 

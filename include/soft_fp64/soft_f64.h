@@ -764,14 +764,13 @@ double sf64_erfc(double x);
 double sf64_tgamma(double x);
 
 /** @brief Natural log of `|Γ(x)|`. @param x @return `log(|gamma(x)|)`.
- *  @details Worst-case **≤1024 ULP** on `[3, 1e4]` against 200-bit MPFR
- *  (DD lgamma body).
- *  **Zero-crossings `x ∈ (0.5, 3)`**: absolute error stays at ~5e-17
- *  (IEEE-double working precision) but ULP ratio against the near-zero
- *  result is ill-conditioned. This range is exercised report-only in
- *  `tests/experimental/experimental_precision.cpp`; graduating it into
- *  GAMMA is blocked on the `logk_dd` DD-Horner rewrite that lifts its
- *  relative precision from 2⁻⁵⁶ to 2⁻¹⁰⁵ (see TODO.md).
+ *  @details Worst-case **≤1024 ULP** vs 200-bit MPFR over the full
+ *  positive shippable range `(0.5, 1e4]`:
+ *  * `(0.5, 3]` — zero-centered DD Taylor pivots at `x = 1` (window
+ *    `|x-1| ≤ 0.25`) and `x = 2` (window `|x-2| ≤ 0.5`), 22-term series
+ *    in DD Horner from DLMF §5.7.3; outside the windows the Lanczos
+ *    body handles the regime.
+ *  * `[3, 1e4]` — Lanczos g=7 in DD.
  *  `lgamma(1) = +0`, `lgamma(2) = +0`.
  *  `lgamma(non-positive integer) = +inf`. `lgamma(±inf) = +inf`. NaN → NaN. */
 double sf64_lgamma(double x);

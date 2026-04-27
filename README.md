@@ -172,7 +172,7 @@ Tiers: `BIT_EXACT` (0 ULP), `U10 = 4 ULP`, `U35 = 8 ULP`, `GAMMA = 1024 ULP`.
 | `erf` | `erf(x)` | **GAMMA** ≤ 1024 ULP | `[-5, 5]`, `test_mpfr_diff.cpp` |
 | `erfc` | `erfc(x)` | **GAMMA** ≤ 1024 ULP | `[-5, 27]` (full active range incl. deep tail) |
 | `tgamma` | `tgamma(x)` | **GAMMA** ≤ 1024 ULP | `[0.5, 170]` (through the overflow boundary) |
-| `lgamma`, `lgamma_r` | `lgamma(x)` | **GAMMA** ≤ 1024 ULP | `[3, 1e4]` (zero-free subrange; see caveat) |
+| `lgamma`, `lgamma_r` | `lgamma(x)` | **GAMMA** ≤ 1024 ULP | `(0.5, 1e4]` — uniform `(0.5, 3]` (zero-crossings via DD Taylor pivots at `x=1`, `x=2`) + log-spaced `[3, 1e4]` Lanczos tail |
 
 ### `sf64_pow` — bounded-region U35
 
@@ -190,14 +190,12 @@ tier remains the gated ceiling.
 
 ### Report-only (NOT CI-gated)
 
-- **`sf64_lgamma` on `(0.5, 3)`** — `lgamma(x)` vanishes at `x = 1`
-  and `x = 2`. Near those zeros the result is O(1e-5) but the absolute
-  error floor of any log-of-Γ path is O(ulp(1)) ≈ 2.2e-16, so the ULP
-  ratio inherently blows past GAMMA=1024 even with a perfectly
-  computed log ingredient. The proper fix is a zero-centered Taylor
-  expansion around `x=1` and `x=2` — tracked in `TODO.md`, not
-  closed by the v1.1 `logk_dd` work. Sweep lives in
-  `tests/experimental/experimental_precision.cpp` as report-only.
+There are currently no parked precision regimes. The previous
+`sf64_lgamma` zero-crossing caveat on `(0.5, 3)` was closed by
+zero-centered Taylor branches in `src/sleef/sleef_stubs.cpp` (DD-Horner
+on the `log Γ(1+z)` and `log Γ(2+z)` series, DLMF §5.7.3, with windows
+`|x-1| ≤ 0.25` and `|x-2| ≤ 0.5`); the sweep graduated to
+`tests/mpfr/test_mpfr_diff.cpp` at `GAMMA` tier.
 
 "Bit-exact" means every output matches the host FPU's round-to-nearest-even
 result in every bit, for every tested input — including every signed-zero,

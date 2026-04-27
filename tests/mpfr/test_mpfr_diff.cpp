@@ -1356,20 +1356,30 @@ int main() {
     // bucket at ~0.9 k ULP — just inside GAMMA.
     results.push_back(sweep1_uniform(
         "tgamma", GAMMA, [](double x) { return sf64_tgamma(x); }, mpfr_gamma, 0.5, 170.0));
-    // lgamma ULP-diff is unbounded near its zeros at x=1 and x=2 (absolute
-    // error stays tiny, but ULP ratio against a near-zero value is not
-    // well-defined). Here we gate on a zero-free subrange x ≥ 3 where the
-    // DD stitching holds the GAMMA band comfortably. The deeper zero-crossing
-    // behavior (which still exceeds GAMMA — dominated by the v1.2 logk_dd
-    // DD-Horner rewrite) is exercised by the report-only harness under
-    // tests/experimental/.
+    // lgamma over the full positive shippable range, including the zero
+    // crossings at x = 1 and x = 2.  Two sweeps:
+    //   * `lgamma_zeros` — uniform [0.5, 3.0], exercising the
+    //     zero-centered Taylor branches in `sleef_stubs.cpp`
+    //     (`lgamma_pos`).  The Taylor branches keep absolute error → 0 as
+    //     x → 1, x → 2, so the ULP ratio at the zeros stays bounded.
+    //     Worst observed across a 100k-sample sweep is ≤ 61 ULP — well
+    //     inside GAMMA = 1024.
+    //   * `lgamma` — log-spaced [3, 1e4], exercising the Lanczos path on
+    //     the zero-free tail.  Bit-equivalent to the pre-Taylor sweep (no
+    //     branch in this range).
+    results.push_back(sweep1_uniform(
+        "lgamma_zeros", GAMMA, [](double x) { return sf64_lgamma(x); }, mpfr_lngamma, 0.5, 3.0));
     results.push_back(sweep1_log(
         "lgamma", GAMMA, [](double x) { return sf64_lgamma(x); }, mpfr_lngamma, 3.0, 1e4, false));
-    // lgamma_r shares the same log-|Γ| magnitude path as lgamma; gate its
-    // magnitude at the same GAMMA tier over the same zero-free subrange.
-    // The out-parameter sign is trivially +1 on [3, 1e4] (Γ is positive
-    // there); sign coverage across the full sign-flipping domain lives in
-    // tests/test_transcendental_1ulp.cpp.
+    // lgamma_r shares the same log-|Γ| magnitude path as lgamma; gate the
+    // magnitude at the same GAMMA tier over both subranges.
+    results.push_back(sweep1_uniform(
+        "lgamma_r_zeros", GAMMA,
+        [](double x) {
+            int sgn = 0;
+            return sf64_lgamma_r(x, &sgn);
+        },
+        mpfr_lngamma, 0.5, 3.0));
     results.push_back(sweep1_log(
         "lgamma_r", GAMMA,
         [](double x) {
