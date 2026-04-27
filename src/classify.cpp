@@ -72,12 +72,16 @@ extern "C" int sf64_signbit(double x) {
 
 // ---- fabs / copysign (pure bit ops) -------------------------------------
 
-extern "C" double sf64_fabs(double x) {
+// SF64_NO_OPT: clang -O3 InstCombine rewrites these bit-twiddle bodies into
+// llvm.fabs.f64 / llvm.copysign.f64 intrinsics, which AdaptiveCpp's MSL
+// emitter then routes back through __acpp_sscp_*_f64 wrappers that call us
+// — infinite recursion, AGX watchdog hang. See defines.h.
+SF64_NO_OPT extern "C" double sf64_fabs(double x) {
     // SAFETY: bit_cast then clear sign bit. No host FP arithmetic.
     return from_bits(bits_of(x) & ~kSignMask);
 }
 
-extern "C" double sf64_copysign(double x, double y) {
+SF64_NO_OPT extern "C" double sf64_copysign(double x, double y) {
     // SAFETY: bit_cast; combine magnitude of x with sign of y via bitops only.
     return from_bits((bits_of(x) & ~kSignMask) | (bits_of(y) & kSignMask));
 }

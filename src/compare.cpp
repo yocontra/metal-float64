@@ -164,7 +164,11 @@ SF64_ALWAYS_INLINE double fmax_precise_impl(double a_, double b_) noexcept {
 // consumption time, the emitter inlines these wrappers at each callsite
 // and the switch const-folds on the constant `pred`.
 
-extern "C" int sf64_fcmp(double a, double b, int pred) {
+// SF64_NO_OPT: keeps clang -O3 from pattern-matching the inlined fcmp_impl
+// body back into `fcmp <pred> double` instructions. AdaptiveCpp's MSL
+// emitter would route those through __acpp_sscp_fcmp_f64 → sf64_fcmp,
+// producing infinite mutual recursion on AGX. See defines.h.
+SF64_NO_OPT extern "C" int sf64_fcmp(double a, double b, int pred) {
     return fcmp_impl(a, b, pred);
 }
 

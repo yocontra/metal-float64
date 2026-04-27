@@ -383,7 +383,11 @@ SF64_ALWAYS_INLINE double div_impl(uint64_t ab, uint64_t bb, uint32_t r_sign,
 
 // ---- ABI ------------------------------------------------------------------
 
-extern "C" double sf64_neg(double a) {
+// SF64_NO_OPT: prevents clang -O3 from collapsing the xor into `fneg double`,
+// which AdaptiveCpp's MSL emitter would otherwise route back through
+// __acpp_sscp_neg_f64 → sf64_neg, producing infinite recursion on AGX.
+// See include/soft_fp64/defines.h.
+SF64_NO_OPT extern "C" double sf64_neg(double a) {
     // Sign-bit flip, preserving NaN payload. Never touch the host FPU.
     return from_bits(bits_of(a) ^ kSignMask);
 }
