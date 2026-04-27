@@ -164,7 +164,18 @@ pin to `1.2.0` so `find_package(soft_fp64)` reports the right value.
   `|lgamma| → 0` near `x = 1` and `x = 2`, even though the absolute
   number is comfortably inside U10.
 
-[1.2.0]: https://github.com/yocontra/soft-fp64/releases/tag/v1.2.0
+### Repository
+
+- **Renamed `yocontra/soft-fp64` → `yocontra/soft-fp`.** The repo now hosts
+  a soft-float library suite; `soft-fp64` is the first (and currently
+  only) shipped library. A `soft-fp128` sibling lands later in this same
+  tree (see `TODO.md`). Existing surface is unchanged: CMake project name
+  stays `soft_fp64`, the artifact stays `libsoft_fp64.a`, `find_package
+  (soft_fp64)` still works, the public `sf64_*` C ABI prefix is stable,
+  and the `include/soft_fp64/` header path is unchanged. Only the
+  GitHub URL moves.
+
+[1.2.0]: https://github.com/yocontra/soft-fp/releases/tag/v1.2.0
 
 ## [1.1.0] — 2026-04-24
 
@@ -407,7 +418,7 @@ and silent (non-raising) exception behavior when `SOFT_FP64_FENV=disabled`.
   zero-centered Taylor rewrite at `x=1` and `x=2`, not better log
   precision.
 
-[1.1.0]: https://github.com/contra/soft-fp64/releases/tag/v1.1.0
+[1.1.0]: https://github.com/yocontra/soft-fp/releases/tag/v1.1.0
 
 ## [1.0.0] — unreleased
 
@@ -508,4 +519,4 @@ Silicon resolve against soft-fp64 instead of trapping.
   ≤4 ULP in the near-unit-base × huge-exponent corner; closes the
   `lgamma (0.5, 3)` zero-crossing sweep).
 
-[1.0.0]: https://github.com/contra/soft-fp64/releases/tag/v1.0.0
+[1.0.0]: https://github.com/yocontra/soft-fp/releases/tag/v1.0.0

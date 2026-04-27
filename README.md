@@ -1,21 +1,42 @@
-# soft-fp64
+# soft-fp
 
-Portable, bit-exact IEEE-754 **double-precision** math in pure integer code —
-for any target without hardware `double`.
+Portable, bit-exact IEEE-754 soft-float libraries in pure integer code —
+for any target without hardware floating-point of the relevant width.
 
-Lots of modern hardware ships without fp64 units: Apple GPUs, most mobile and
-tile-based GPUs, WebGPU / OpenGL ES class devices, many embedded DSPs, FPGAs,
-and custom accelerators. When scientific, geospatial, cryptographic, or
-scientific-computing code hits one of these targets, the compiler either
+The repository hosts a suite of integer-only IEEE-754 implementations that
+share build infrastructure, oracle setup (Berkeley TestFloat 3e + MPFR),
+benchmark harness, and ABI conventions. Currently shipping:
+
+- **`soft-fp64`** — the full binary64 surface (arithmetic, compare, full
+  width-matrix conversions, sqrt, fma, rounding, classification,
+  transcendentals). Static archive `libsoft_fp64.a`, public `sf64_*`
+  C ABI, `find_package(soft_fp64)`. The rest of this README is about
+  this library — see precision tables, install paths, and integration
+  notes below.
+
+Planned (not yet implemented; see `TODO.md`):
+
+- **`soft-fp128`** — same playbook extended to 113-bit binary128. Sibling
+  static archive `libsoft_fp128.a`, public `sf128_*` C ABI,
+  `find_package(soft_fp128)`. Decoupled release cadence from `soft-fp64`.
+
+The README, CMakeLists, `find_package` name, `sf64_*` ABI prefix, and
+`include/soft_fp64/` header path are stable surface for the fp64 library
+and won't shift when fp128 lands alongside.
+
+## What soft-fp64 does
+
+Lots of modern hardware ships without fp64 units: Apple GPUs, most mobile
+and tile-based GPUs, WebGPU / OpenGL ES class devices, many embedded DSPs,
+FPGAs, and custom accelerators. When scientific, geospatial, cryptographic,
+or scientific-computing code hits one of these targets, the compiler either
 traps, silently truncates to `float`, or refuses to lower the code at all.
 
-This library is a clean, header-plus-object C++17 implementation of the full
-IEEE-754 binary64 surface — arithmetic, comparisons, full width-matrix
-conversions, sqrt, fma, rounding, classification, and transcendentals — built
-entirely on 32/64-bit integer bit operations. There is no hidden dependency
-on the host FPU. Any frontend that can emit a call to an `extern "C"`
-symbol can get correct `double` behavior on a device without a hardware
-fp64 unit.
+`soft-fp64` is a clean, header-plus-object C++17 implementation of the full
+IEEE-754 binary64 surface, built entirely on 32/64-bit integer bit
+operations. There is no hidden dependency on the host FPU. Any frontend
+that can emit a call to an `extern "C"` symbol can get correct `double`
+behavior on a device without a hardware fp64 unit.
 
 ## Where this is useful
 

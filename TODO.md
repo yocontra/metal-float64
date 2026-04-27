@@ -72,18 +72,33 @@ surface), `half_*` / single-precision variants (different library),
 fenv exception flags (OpenCL has no `<fenv.h>` equivalent;
 `disabled` is the OpenCL-matching fenv setting).
 
-### `soft-fp128` sibling
+### `soft-fp128` sibling library
 
-**What.** Same design playbook (Mesa arithmetic port + SLEEF
+**What.** Same design playbook (Mesa arithmetic port + SLEEF / DD-style
 transcendentals + TestFloat + MPFR oracle) extended to 113-bit
-significand. Storage wrapper; full conversion matrix (`f64 ↔ f128`,
-`i128 ↔ f128`); u10 transcendentals vs MPFR 300-bit.
+significand. Static archive `libsoft_fp128.a` alongside `libsoft_fp64.a`
+in this same `yocontra/soft-fp` repo. Public C ABI prefix `sf128_*`
+mirroring `sf64_*` (arithmetic, compare, full conversion matrix
+including `f64 ↔ f128` and `i128 ↔ f128`, sqrt, fma, rounding,
+classify, transcendentals). u10 transcendentals gated against MPFR
+300-bit; bit-exact arithmetic gated against TestFloat fp128 vectors.
 
-**Why it matters.** Same consumers (GPU / MCU targets that lack
-hardware fp128) need it. Decoupled from fp64 on the release
-timeline.
+**Why it matters.** Same consumers (GPU / MCU / wasm targets without
+hardware fp128) need it. Decoupled from fp64 on the release timeline,
+but co-located so the build infrastructure, oracle setup, benchmark
+harness, and ABI conventions are shared rather than re-invented in a
+sibling repo.
 
-**What's needed.** Ships as a separate package once fp64 stabilizes.
+**What's needed.** When work starts, introduce a top-level layout
+split — likely `fp64/` and `fp128/` subtrees with a top-level
+`CMakeLists.txt` orchestrating both — and grow the existing
+`adapters/` and `tests/testfloat/` / `tests/mpfr/` infrastructure to
+exercise both precisions. Until then, the repo stays flat with `src/`
++ `include/soft_fp64/` at root; restructuring before fp128 has files
+to put somewhere is premature. SLEEF doesn't ship fp128 polynomials,
+so the transcendental story will draw from a different reference (Sun
+fdlibm-q, Boost.Multiprecision-derived coefficient sets, or DD/QD
+arithmetic on top of `sf64_*` — TBD when the work starts).
 
 ---
 
