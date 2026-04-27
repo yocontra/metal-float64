@@ -708,3 +708,177 @@ extern "C" uint64_t sf64_to_u64_r(sf64_rounding_mode mode, double x) {
     fe.flush();
     return r;
 }
+
+// ---------------------------------------------------------------------------
+// Caller-state (`_ex`) convert entries. Bodies are bit-identical to the
+// TLS-backed surface above. See src/arithmetic.cpp for design rationale.
+// Compiled out under SOFT_FP64_FENV_MODE == 0 (disabled).
+// ---------------------------------------------------------------------------
+
+#if SOFT_FP64_FENV_MODE == 1 || SOFT_FP64_FENV_MODE == 2
+
+extern "C" float sf64_to_f32_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const float r = to_f32_impl(x, SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" float sf64_to_f32_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const float r = to_f32_impl(x, mode, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_from_i8_ex(int8_t x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = i64_to_fp64(static_cast<int64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+extern "C" double sf64_from_i16_ex(int16_t x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = i64_to_fp64(static_cast<int64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+extern "C" double sf64_from_i32_ex(int32_t x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = i64_to_fp64(static_cast<int64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+extern "C" double sf64_from_i64_ex(int64_t x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = i64_to_fp64(x, SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_from_u8_ex(uint8_t x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+extern "C" double sf64_from_u16_ex(uint16_t x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+extern "C" double sf64_from_u32_ex(uint32_t x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = u64_to_fp64(static_cast<uint64_t>(x), SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+extern "C" double sf64_from_u64_ex(uint64_t x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = u64_to_fp64(x, SF64_RNE, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" int8_t sf64_to_i8_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const int8_t r = static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
+}
+extern "C" int16_t sf64_to_i16_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const int16_t r = static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
+}
+extern "C" int32_t sf64_to_i32_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const int32_t r = static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
+}
+extern "C" int64_t sf64_to_i64_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const int64_t r = fp64_to_signed(x, INT64_MIN, INT64_MAX, SF64_RTZ, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" uint8_t sf64_to_u8_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const uint8_t r = static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
+}
+extern "C" uint16_t sf64_to_u16_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const uint16_t r = static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
+}
+extern "C" uint32_t sf64_to_u32_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const uint32_t r = static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX, SF64_RTZ, fe));
+    fe.flush();
+    return r;
+}
+extern "C" uint64_t sf64_to_u64_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const uint64_t r = fp64_to_unsigned(x, UINT64_MAX, SF64_RTZ, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" int8_t sf64_to_i8_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const int8_t r = static_cast<int8_t>(fp64_to_signed(x, INT8_MIN, INT8_MAX, mode, fe));
+    fe.flush();
+    return r;
+}
+extern "C" int16_t sf64_to_i16_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const int16_t r = static_cast<int16_t>(fp64_to_signed(x, INT16_MIN, INT16_MAX, mode, fe));
+    fe.flush();
+    return r;
+}
+extern "C" int32_t sf64_to_i32_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const int32_t r = static_cast<int32_t>(fp64_to_signed(x, INT32_MIN, INT32_MAX, mode, fe));
+    fe.flush();
+    return r;
+}
+extern "C" int64_t sf64_to_i64_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const int64_t r = fp64_to_signed(x, INT64_MIN, INT64_MAX, mode, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" uint8_t sf64_to_u8_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const uint8_t r = static_cast<uint8_t>(fp64_to_unsigned(x, UINT8_MAX, mode, fe));
+    fe.flush();
+    return r;
+}
+extern "C" uint16_t sf64_to_u16_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const uint16_t r = static_cast<uint16_t>(fp64_to_unsigned(x, UINT16_MAX, mode, fe));
+    fe.flush();
+    return r;
+}
+extern "C" uint32_t sf64_to_u32_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const uint32_t r = static_cast<uint32_t>(fp64_to_unsigned(x, UINT32_MAX, mode, fe));
+    fe.flush();
+    return r;
+}
+extern "C" uint64_t sf64_to_u64_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const uint64_t r = fp64_to_unsigned(x, UINT64_MAX, mode, fe);
+    fe.flush();
+    return r;
+}
+
+#endif // SOFT_FP64_FENV_MODE == 1 || SOFT_FP64_FENV_MODE == 2

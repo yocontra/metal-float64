@@ -1,11 +1,26 @@
-// Public sf64_fe_* surface. Storage lives here; call sites in arithmetic /
-// sqrt_fma / convert / sleef raise into it through the SF64_FE_RAISE macro
-// in src/internal_fenv.h.
+// Public sf64_fe_* surface (TLS-backed) plus the parallel sf64_fe_*_ex
+// surface (caller-state-backed). Storage and call sites:
 //
-// SOFT_FP64_FENV_MODE:
-//   0 — disabled: every public entry is a no-op (or returns 0).
-//   1 — tls: per-thread accumulator, thread_local storage duration.
-//   2 — explicit: reserved for a future caller-state ABI; today same as 0.
+//   SOFT_FP64_FENV_MODE:
+//     0 — disabled: every public entry below is a no-op (or returns 0).
+//                   Both surfaces are still emitted so adapters that
+//                   reference either ABI link cleanly; CMake's
+//                   `disabled` cell uses a separate sentinel that hides
+//                   them from `nm -g` only when the entire fenv ABI is
+//                   intentionally absent (the install-smoke gate already
+//                   permits the symbols on the safe sf64_* prefix).
+//     1 — tls: thread_local sticky accumulator. The default `sf64_fe_*`
+//              surface reads/writes that bag. The `sf64_fe_*_ex` surface
+//              services callers that supply their own state pointer.
+//     2 — explicit: thread_local storage is omitted (so consumers like
+//              Metal / WebGPU GPU kernels can link). The TLS surface
+//              compiles to no-op stubs; only `sf64_fe_*_ex` carries
+//              flag state — and only when the caller passes a non-null
+//              `sf64_fe_state_t*`.
+//
+// Cross-TU raise sites in arithmetic / sqrt_fma / convert / sleef thread
+// either the TLS-backed or caller-state-backed accumulator (see
+// src/internal_fenv.h) — both end up here at flush time.
 //
 // SPDX-License-Identifier: MIT
 
@@ -17,6 +32,12 @@ namespace soft_fp64::internal {
 [[gnu::tls_model("initial-exec")]] thread_local unsigned sf64_internal_fe_flags = 0u;
 #endif
 } // namespace soft_fp64::internal
+
+// ---------------------------------------------------------------------------
+// Default (TLS) surface — present in `tls` mode; under `disabled` and
+// `explicit` it compiles to no-op shims so adapters that mix and match
+// the two surfaces still link.
+// ---------------------------------------------------------------------------
 
 extern "C" unsigned sf64_fe_getall(void) {
 #if SOFT_FP64_FENV_MODE == 1
@@ -70,3 +91,47 @@ extern "C" void sf64_fe_restore(const sf64_fe_state_t* in) {
     (void)in;
 #endif
 }
+
+// ---------------------------------------------------------------------------
+// Caller-state surface (`_ex`). Present under `tls` and `explicit`; the
+// `disabled` build hides it (and the underlying raise sites are no-ops
+// regardless).
+// ---------------------------------------------------------------------------
+
+#if SOFT_FP64_FENV_MODE == 1 || SOFT_FP64_FENV_MODE == 2
+
+extern "C" unsigned sf64_fe_getall_ex(const sf64_fe_state_t* state) {
+    return state != nullptr ? state->flags : 0u;
+}
+
+extern "C" int sf64_fe_test_ex(const sf64_fe_state_t* state, unsigned mask) {
+    if (state == nullptr)
+        return 0;
+    return (state->flags & mask) != 0 ? 1 : 0;
+}
+
+extern "C" void sf64_fe_raise_ex(sf64_fe_state_t* state, unsigned mask) {
+    if (state == nullptr)
+        return;
+    state->flags |= mask;
+}
+
+extern "C" void sf64_fe_clear_ex(sf64_fe_state_t* state, unsigned mask) {
+    if (state == nullptr)
+        return;
+    state->flags &= ~mask;
+}
+
+extern "C" void sf64_fe_save_ex(const sf64_fe_state_t* state, sf64_fe_state_t* out) {
+    if (out == nullptr)
+        return;
+    out->flags = state != nullptr ? state->flags : 0u;
+}
+
+extern "C" void sf64_fe_restore_ex(sf64_fe_state_t* state, const sf64_fe_state_t* in) {
+    if (state == nullptr || in == nullptr)
+        return;
+    state->flags = in->flags;
+}
+
+#endif // SOFT_FP64_FENV_MODE == 1 || SOFT_FP64_FENV_MODE == 2

@@ -933,6 +933,122 @@ void sf64_fe_restore(const sf64_fe_state_t* in);
 
 /** @} */ // fenv
 
+/**
+ * @name fenv_ex IEEE-754 exception flags (caller-supplied state)
+ * @brief Parallel ABI matching the @ref fenv surface but reading and
+ *        writing a caller-provided @ref sf64_fe_state_t instead of
+ *        thread-local storage.
+ *
+ * GPU and SIMT consumers (Apple Metal, WebGPU/WGSL, OpenCL device code)
+ * can't use `thread_local`, so the TLS-backed default surface is
+ * unreachable in those targets. The `_ex` surface accepts a pointer to a
+ * stack-local @ref sf64_fe_state_t and the parallel arithmetic / sqrt /
+ * fma / convert ABI (`sf64_*_ex`) raises into that struct directly.
+ *
+ * Mode availability:
+ *  - `SOFT_FP64_FENV=tls` (default): both surfaces are emitted. The
+ *    default surface still uses TLS; the `_ex` surface uses the caller's
+ *    pointer (a null pointer drops flags).
+ *  - `SOFT_FP64_FENV=explicit`: only the `_ex` surface carries state.
+ *    The TLS surface compiles to no-op stubs (returns 0 / no-op writes)
+ *    so consumers that reference both surfaces still link, but the TLS
+ *    flag bag does not exist on the device.
+ *  - `SOFT_FP64_FENV=disabled`: both surfaces compile to no-ops, every
+ *    raise site in the library is DCE'd, and the `_ex` symbols are not
+ *    emitted into the archive.
+ *
+ * Bit layout of @ref sf64_fe_state_t::flags is the same as the TLS
+ * surface — reuses the `SF64_FE_*` enum values.
+ * @{
+ */
+
+/** @brief Read all currently-sticky flags from the caller's state.
+ *  @param state caller-supplied state; null returns 0. */
+unsigned sf64_fe_getall_ex(const sf64_fe_state_t* state);
+
+/** @brief Test whether any flag in `mask` is set in the caller's state.
+ *  @param state caller-supplied state; null returns 0.
+ *  @param mask bitwise-OR of @ref sf64_fe_flag values. */
+int sf64_fe_test_ex(const sf64_fe_state_t* state, unsigned mask);
+
+/** @brief Set the given flags sticky in the caller's state.
+ *  @param state caller-supplied state; null is a no-op.
+ *  @param mask bitwise-OR of @ref sf64_fe_flag values. */
+void sf64_fe_raise_ex(sf64_fe_state_t* state, unsigned mask);
+
+/** @brief Clear the given flags from the caller's state.
+ *  @param state caller-supplied state; null is a no-op.
+ *  @param mask bitwise-OR of @ref sf64_fe_flag values. */
+void sf64_fe_clear_ex(sf64_fe_state_t* state, unsigned mask);
+
+/** @brief Snapshot the caller's state into `out`. Both arguments may be
+ *  null (no-op when `out` is null; reads zero when `state` is null). */
+void sf64_fe_save_ex(const sf64_fe_state_t* state, sf64_fe_state_t* out);
+
+/** @brief Replace the caller's state from `in`. Either argument null is a
+ *  no-op (no host fp64 fallback — the call simply does nothing). */
+void sf64_fe_restore_ex(sf64_fe_state_t* state, const sf64_fe_state_t* in);
+
+/**
+ * @name Caller-state arithmetic / sqrt / fma / convert (`sf64_*_ex`)
+ * @brief Bit-identical to their TLS-backed counterparts; the only
+ *        difference is that exception flags raised by the operation are
+ *        OR'd into `*state` instead of into the thread-local sticky bag.
+ *        A null `state` pointer drops flags (zero overhead).
+ * @{
+ */
+
+double sf64_add_ex(double a, double b, sf64_fe_state_t* state);
+double sf64_sub_ex(double a, double b, sf64_fe_state_t* state);
+double sf64_mul_ex(double a, double b, sf64_fe_state_t* state);
+double sf64_div_ex(double a, double b, sf64_fe_state_t* state);
+double sf64_sqrt_ex(double x, sf64_fe_state_t* state);
+double sf64_fma_ex(double a, double b, double c, sf64_fe_state_t* state);
+
+/** @brief Mode-parametrised explicit-state addition. Combines the `_r`
+ *  rounding-mode dispatch with the `_ex` caller-state ABI. */
+double sf64_add_r_ex(sf64_rounding_mode mode, double a, double b, sf64_fe_state_t* state);
+double sf64_sub_r_ex(sf64_rounding_mode mode, double a, double b, sf64_fe_state_t* state);
+double sf64_mul_r_ex(sf64_rounding_mode mode, double a, double b, sf64_fe_state_t* state);
+double sf64_div_r_ex(sf64_rounding_mode mode, double a, double b, sf64_fe_state_t* state);
+double sf64_sqrt_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+double sf64_fma_r_ex(sf64_rounding_mode mode, double a, double b, double c, sf64_fe_state_t* state);
+
+/** @brief Narrow f64 → f32 (RNE, caller-state). @see sf64_to_f32 */
+float sf64_to_f32_ex(double x, sf64_fe_state_t* state);
+/** @brief Narrow f64 → f32 with explicit rounding mode (caller-state). */
+float sf64_to_f32_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+
+double sf64_from_i8_ex(int8_t x, sf64_fe_state_t* state);
+double sf64_from_i16_ex(int16_t x, sf64_fe_state_t* state);
+double sf64_from_i32_ex(int32_t x, sf64_fe_state_t* state);
+double sf64_from_i64_ex(int64_t x, sf64_fe_state_t* state);
+double sf64_from_u8_ex(uint8_t x, sf64_fe_state_t* state);
+double sf64_from_u16_ex(uint16_t x, sf64_fe_state_t* state);
+double sf64_from_u32_ex(uint32_t x, sf64_fe_state_t* state);
+double sf64_from_u64_ex(uint64_t x, sf64_fe_state_t* state);
+
+int8_t sf64_to_i8_ex(double x, sf64_fe_state_t* state);
+int16_t sf64_to_i16_ex(double x, sf64_fe_state_t* state);
+int32_t sf64_to_i32_ex(double x, sf64_fe_state_t* state);
+int64_t sf64_to_i64_ex(double x, sf64_fe_state_t* state);
+uint8_t sf64_to_u8_ex(double x, sf64_fe_state_t* state);
+uint16_t sf64_to_u16_ex(double x, sf64_fe_state_t* state);
+uint32_t sf64_to_u32_ex(double x, sf64_fe_state_t* state);
+uint64_t sf64_to_u64_ex(double x, sf64_fe_state_t* state);
+
+int8_t sf64_to_i8_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+int16_t sf64_to_i16_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+int32_t sf64_to_i32_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+int64_t sf64_to_i64_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+uint8_t sf64_to_u8_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+uint16_t sf64_to_u16_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+uint32_t sf64_to_u32_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+uint64_t sf64_to_u64_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state);
+
+/** @} */
+/** @} */ // fenv_ex
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

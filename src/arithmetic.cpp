@@ -720,3 +720,81 @@ extern "C" double sf64_rem(double a, double b) {
     fe.flush();
     return r;
 }
+
+// ---------------------------------------------------------------------------
+// Caller-state (`_ex`) entry points. Bodies are bit-identical to the
+// TLS-backed surface above — the only difference is the accumulator is
+// constructed with the caller's `sf64_fe_state_t*` so flushing OR's
+// flags into the supplied struct instead of into TLS. Null state is
+// honoured as "drop flags" (zero-overhead path for callers that don't
+// care about flag observability).
+//
+// Compiled out under SOFT_FP64_FENV_MODE == 0 (disabled): the disabled
+// archive intentionally has no fenv ABI surface, both the TLS and the
+// `_ex` symbols are absent, and consumers that need flag observability
+// must build with tls or explicit.
+// ---------------------------------------------------------------------------
+
+#if SOFT_FP64_FENV_MODE == 1 || SOFT_FP64_FENV_MODE == 2
+
+extern "C" double sf64_add_ex(double a, double b, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = sf64_internal_add_rne(a, b, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_add_r_ex(sf64_rounding_mode mode, double a, double b,
+                                sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = add_r_impl(a, b, mode, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_sub_ex(double a, double b, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = sf64_internal_sub_rne(a, b, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_sub_r_ex(sf64_rounding_mode mode, double a, double b,
+                                sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = add_r_impl(a, sf64_neg(b), mode, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_mul_ex(double a, double b, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = sf64_internal_mul_rne(a, b, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_mul_r_ex(sf64_rounding_mode mode, double a, double b,
+                                sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = mul_r_impl(a, b, mode, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_div_ex(double a, double b, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = sf64_internal_div_rne(a, b, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_div_r_ex(sf64_rounding_mode mode, double a, double b,
+                                sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = div_r_impl(a, b, mode, fe);
+    fe.flush();
+    return r;
+}
+
+#endif // SOFT_FP64_FENV_MODE == 1 || SOFT_FP64_FENV_MODE == 2

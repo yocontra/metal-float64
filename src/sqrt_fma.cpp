@@ -792,3 +792,43 @@ extern "C" double sf64_fma_r(sf64_rounding_mode mode, double a, double b, double
     fe.flush();
     return r;
 }
+
+// ---------------------------------------------------------------------------
+// Caller-state (`_ex`) entries for sqrt / fma. Bit-identical bodies; the
+// only difference is the accumulator construction takes an explicit
+// `sf64_fe_state_t*`. See src/arithmetic.cpp for the rationale and
+// src/internal_fenv.h for the accumulator semantics.
+// ---------------------------------------------------------------------------
+
+#if SOFT_FP64_FENV_MODE == 1 || SOFT_FP64_FENV_MODE == 2
+
+extern "C" double sf64_sqrt_ex(double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = sf64_internal_sqrt_rne(x, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_sqrt_r_ex(sf64_rounding_mode mode, double x, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = sqrt_r_impl(x, mode, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_fma_ex(double a, double b, double c, sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = sf64_internal_fma_rne(a, b, c, fe);
+    fe.flush();
+    return r;
+}
+
+extern "C" double sf64_fma_r_ex(sf64_rounding_mode mode, double a, double b, double c,
+                                sf64_fe_state_t* state) {
+    sf64_internal_fe_acc fe{state};
+    const double r = fma_r_impl(a, b, c, mode, fe);
+    fe.flush();
+    return r;
+}
+
+#endif // SOFT_FP64_FENV_MODE == 1 || SOFT_FP64_FENV_MODE == 2

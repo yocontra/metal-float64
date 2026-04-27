@@ -50,16 +50,18 @@ target_sources(soft_fp64 PRIVATE
 
 # IEEE-754 exception-flag storage. `tls` uses a thread_local accumulator;
 # `disabled` compiles every raise / query to a no-op (zero-cost); `explicit`
-# is reserved for a future caller-provided state ABI.
+# emits the parallel `sf64_*_ex` caller-state ABI for GPU / SIMT consumers
+# (Apple Metal, WebGPU, OpenCL device code) where `thread_local` is not
+# available — and the legacy TLS surface stays present as no-op stubs so
+# adapters that reference both can link.
 set(SOFT_FP64_FENV "tls" CACHE STRING
-    "Exception-flag storage: tls | disabled | explicit (reserved)")
+    "Exception-flag storage: tls | disabled | explicit")
 set_property(CACHE SOFT_FP64_FENV PROPERTY STRINGS tls disabled explicit)
 if(SOFT_FP64_FENV STREQUAL "tls")
     target_compile_definitions(soft_fp64 PRIVATE SOFT_FP64_FENV_MODE=1)
 elseif(SOFT_FP64_FENV STREQUAL "disabled")
     target_compile_definitions(soft_fp64 PRIVATE SOFT_FP64_FENV_MODE=0)
 elseif(SOFT_FP64_FENV STREQUAL "explicit")
-    # Reserved for 1.2+; compiles as disabled today.
     target_compile_definitions(soft_fp64 PRIVATE SOFT_FP64_FENV_MODE=2)
 else()
     message(FATAL_ERROR "SOFT_FP64_FENV must be tls | disabled | explicit")
