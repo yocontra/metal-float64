@@ -22,10 +22,12 @@
 // `sf64_fe_getall()` after the op. The runner clears flags between vectors
 // so each comparison is local. Underflow convention is aligned by passing
 // `-tininessbefore` to testfloat_gen (soft-fp64 detects tininess before
-// rounding — the MIPS / RISC-V / RV64G / POWER default). Vectors where any
-// input is a signaling NaN have their flag check skipped: `sf64_*` currently
-// quiets sNaN inputs silently; sNaN→INVALID wiring is deferred to 1.2
-// alongside `SOFT_FP64_SNAN_PROPAGATE` (see TODO.md).
+// rounding — the MIPS / RISC-V / RV64G / POWER default). Every vector —
+// including sNaN-input rows — goes through the flag gate; sNaN inputs raise
+// `SF64_FE_INVALID` per IEEE 754 §7.2 (wired in src/internal_arith.h and the
+// mode-parametric `_r` paths). The earlier carve-out for sNaN-input vectors
+// was lifted in v1.2.0; payload-bit preservation across the qNaN-force
+// remains under the `SOFT_FP64_SNAN_PROPAGATE` opt-in (see TODO.md).
 //
 // Any quiet-NaN result counts as "equal" to any expected quiet-NaN
 // (matches the existing test_arithmetic_exact.cpp convention). Non-NaN

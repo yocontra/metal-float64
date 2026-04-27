@@ -169,10 +169,10 @@ Tiers: `BIT_EXACT` (0 ULP), `U10 = 4 ULP`, `U35 = 8 ULP`, `GAMMA = 1024 ULP`.
 | Transcendentals (u10) | `sin`, `cos`, `asin`, `acos`, `atan`, `atan2`, `exp`, `exp2`, `exp10`, `expm1`, `log`, `log2`, `log10`, `log1p`, `cbrt`, `cosh`, `acosh`, `atanh`, `sinpi`, `cospi`, `asinpi`, `acospi`, `atanpi`, `atan2pi` | **U10** ≤ 4 ULP | `test_mpfr_diff.cpp` |
 | Transcendentals (u35) | `tan`, `tanpi`, `sinh`, `tanh`, `asinh` | **U35** ≤ 8 ULP | `test_mpfr_diff.cpp` |
 | `pow` / `powr` / `pown` / `rootn` | `pow(x, y)`, `powr(x, y)`, `pown(x, n)`, `rootn(x, n)` | **U35** ≤ 8 ULP, bounded region | three overlapping windows, see note |
-| `erf` | `erf(x)` | **GAMMA** ≤ 1024 ULP | `[-5, 5]`, `test_mpfr_diff.cpp` |
-| `erfc` | `erfc(x)` | **GAMMA** ≤ 1024 ULP | `[-5, 27]` (full active range incl. deep tail) |
-| `tgamma` | `tgamma(x)` | **GAMMA** ≤ 1024 ULP | `[0.5, 170]` (through the overflow boundary) |
-| `lgamma`, `lgamma_r` | `lgamma(x)` | **GAMMA** ≤ 1024 ULP | `(0.5, 1e4]` — uniform `(0.5, 3]` (zero-crossings via DD Taylor pivots at `x=1`, `x=2`) + log-spaced `[3, 1e4]` Lanczos tail |
+| `erf` | `erf(x)` | **U10** ≤ 4 ULP | `[-5, 5]`, `test_mpfr_diff.cpp` (SLEEF u1 port; measured worst 1 ULP) |
+| `erfc` | `erfc(x)` | **U10** ≤ 4 ULP | `[-5, 27]` (full active range incl. deep tail; measured worst 1 ULP) |
+| `tgamma` | `tgamma(x)` | **U10** ≤ 4 ULP | `[0.5, 170]` (through the overflow boundary; measured worst 1 ULP) |
+| `lgamma`, `lgamma_r` | `lgamma(x)` | **U10** ≤ 4 ULP zero-free tail; **GAMMA** at zero-crossings | `[3, 1e4]` U10 Lanczos tail + `(0.5, 3)` GAMMA (ULP ratio unbounded as `\|lgamma\| → 0` near `x=1, 2`; absolute error stays inside U10) |
 
 ### `sf64_pow` — bounded-region U35
 

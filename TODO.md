@@ -1,288 +1,38 @@
 # TODO
 
-Single source of truth for open work. Items closed at 1.0 / 1.1 are
-recorded in `CHANGELOG.md`, not here.
+Single source of truth for open work. Items closed at 1.0 / 1.1 / 1.2
+are recorded in `CHANGELOG.md`, not here.
 
-## Blocking v1.1.0
+## Post-1.2
 
-These block tagging. Each is a concrete, bounded change — not a
-research task.
+### sNaN payload preservation
 
-### `sf64_pow` cross-TU inlining regression
+**What.** Today sNaN → qNaN on entry with a canonical payload (sign +
+quieted high-bit). 1.2 raises `SF64_FE_INVALID` on every sNaN-input
+arithmetic / sqrt / fma / convert / fmod / remainder operation, but the
+payload bits 50:0 of the original sNaN are still discarded by
+`propagate_nan` in `src/internal.h`. IEEE 754 §6.2 lets implementations
+preserve the signalling-payload bits through the quiet-bit force, so a
+strict consumer can chain the original payload across an arithmetic
+chain.
 
-**What.** `sf64_pow` runs +43% slower in disabled-mode bench than the
-1.0 baseline.
+**Why it matters.** A handful of TestFloat vectors test payload
+preservation specifically (separate from the sNaN-input INVALID raise,
+which is now gated). Some scientific consumers encode debug
+information in the payload and expect it to survive arithmetic.
 
-**Why it matters.** Fails the 1.0-baseline bench gate, which blocks the
-tag. The regression is the 1.1 rounding-mode parameter payment at
-every DD helper call site in `src/sleef/sleef_common.h`: the DD
-primitives call `sf64_add` / `sub` / `mul` / `div` / `fma` as cross-TU
-`extern "C"` entries, so `SF64_ALWAYS_INLINE` doesn't reach them
-without library-wide LTO. The mode argument arrives as a runtime
-value, the 5-way rounding switch survives in the DD primitive, and
-`sf64_pow`'s ~160 arithmetic calls per invocation accumulate the
-cost. Arithmetic / sqrt / fma called directly (same TU as their
-public entry) already recovered — this is only the transcendentals
-that compose through DD primitives.
-
-**What's needed.** Expose hidden-visibility header-inlined RNE
-specializations of the hot primitives in a new `src/internal_arith.h`
-(`sf64_internal_{add,sub,mul,div,fma,sqrt}_rne`, no `mode` parameter —
-RNE is hard-specialized). `sf64_add` etc. public entries become thin
-wrappers. Every direct arithmetic call site across
-`src/sleef/sleef_common.h`, `sleef_trig.cpp`, `sleef_exp_log.cpp`,
-`sleef_inv_hyp_pow.cpp`, `sleef_stubs.cpp` swaps to the `_rne`
-helpers; DD primitives thread a stack-local `sf64_internal_fe_acc&
-fe` through the call tree and flush once at each SLEEF public
-entry's return. Alternative rejected: library-wide LTO, which
-breaks static-archive ABI and the `install-smoke` `nm -g` gate.
-Verification: full unfiltered ctest green in both fenv modes; disasm
-of `sf64_pow` shows no `bl _sf64_add` / `bl _sf64_mul` calls and no
-5-way mode switch; `compare.py` pow delta within +10% vs 1.0.
-
-### Bench-gate cheap-op carveout
-
-**What.** `bench/compare.py` gains a `--cheap-op-absolute-budget=5.0`
-flag that exempts any op with a <15 ns baseline from the percentage
-gate provided the absolute delta is within the budget.
-
-**Why it matters.** `sf64_to_i32` runs +166% in tls-mode vs
-disabled-mode. Investigation confirmed this is the structural Apple
-Silicon TLS-access cost (~4.45 ns per `__tlv_get_addr`), not a
-fixable implementation issue — every `to_iN` / `to_uN` entry raises
-from 4–6 sites so the accumulator is already optimal, and the
-`initial-exec` TLS model is already applied. On a 2.68 ns baseline
-the absolute delta is ~5 ns; the percentage is what looks alarming.
-Cheap ops with sub-15 ns baselines pay the same ~5 ns TLS roundtrip
-regardless, so the percentage gate is the wrong signal for them.
-
-**What's needed.** `bench/compare.py` flag implementation;
-`.github/workflows/ci.yml` bench-regression job updated to pass it;
-`CHANGELOG.md` 1.1.0 "Performance — fenv-tls mode" subsection
-documenting the ~5 ns per-op absolute cost on Apple Silicon plus the
-cheap-op carveout. Cross-reference the `explicit`-state fenv ABI
-(Post-1.1) as the path that removes the TLS floor.
-
-### `sf64_floor` disabled-mode noise remeasure
-
-**What.** `sf64_floor` shows +12% disabled-mode regression vs 1.0 at
-`--min-time-ms=500`.
-
-**Why it matters.** Fails the 1.0-baseline gate, but source is
-byte-identical to 1.0 and every helper it calls was already
-`SF64_ALWAYS_INLINE` pre-1.1. The delta is 0.78 ns on a 6.5 ns
-baseline — consistent with measurement noise on shared-runner-class
-hardware.
-
-**What's needed.** Re-measure at `--min-time-ms=2000` ×3 samples. If
-all three samples land within +10% of 1.0, note jitter dominance in
-`CHANGELOG.md` and declare resolved. If the regression persists at
-the longer run length, ship 1.1 with it documented and carry the
-instruction-cache-alignment investigation to v1.1.1.
-
-### TestFloat flag-column gate
-
-**What.** Remove the "flags ignored" carve-out in
-`tests/testfloat/run_testfloat.cpp`; parse the `fl2` column, compare
-against `sf64_fe_getall()` after each vector, fail on mismatch.
-
-**Why it matters.** The 7.16M TestFloat corpus ships with expected
-flag bits; without the gate, the 1.1 fenv raise-site coverage is
-untested at scale. The carve-out existed because raise sites didn't
-exist; now they do.
-
-**What's needed.** Runs under `SOFT_FP64_FENV=tls`. Any mismatch
-blocks the tag — no row-skipping or suppression, no allowlist.
-
-### Thread-safety test for the fenv accumulator
-
-**What.** Add a two-thread test where each thread runs arithmetic
-that raises different flag bits and asserts each thread observes only
-its own accumulator.
-
-**Why it matters.** The implementation uses thread-local storage; the
-thread-independence claim needs a test.
-
-**What's needed.** `tests/test_fenv_threads.cpp` new file, or extend
-`tests/test_fenv.cpp`.
-
-### ACPP Metal adapter picks up `SOFT_FP64_FENV_MODE`
-
-**What.** `adapters/acpp_metal/CMakeLists.txt` and
-`cmake/rewrite_sleef_include.cmake` propagate the top-level
-`SOFT_FP64_FENV` build option into the staged source tree.
-
-**Why it matters.** Today the adapter always compiles Metal bitcode
-with `SOFT_FP64_FENV_MODE=0` regardless of core configuration, so
-fenv flag raising silently no-ops on Metal — a configuration drift
-bug, not a design choice.
-
-**What's needed.** Plumbing only; no numerical change.
-
----
-
-## Planned for v1.1
-
-Non-blocking but targeted at the 1.1 tag.
-
-### `logk_dd` DD-Horner rewrite
-
-**What.** Replace the plain-double tail polynomial at the end of
-`logk_dd` (`src/sleef/sleef_inv_hyp_pow.cpp:207-235`) with a DD
-Horner chain against the full `x²` DD pair; promote the top 2–3
-coefficients to DD-pair storage.
-
-**Why it matters.** Today the tail caps the log DD at ~2⁻⁵⁶
-relative, which is the root cause of `sf64_pow` worst-case ~40 ULP
-in the near-unit-base × huge-exponent window. With the fix, pow
-drops to ≤4 ULP across the double range and the gate in
-`tests/mpfr/test_mpfr_diff.cpp` can demote U35 → U10. Also unblocks
-`sf64_lgamma` `(0.5, 3)` graduation from experimental to the shipped
-suite at GAMMA tier (see Post-1.1).
-
-**What's needed.** Uses existing DD helpers (`ddmul_dd_dd_d`,
-`ddadd2_dd_dd_d`) already in scope. Signature / call site in
-`src/sleef/sleef_stubs.cpp` unchanged.
-
-### `sf64_sinh` overflow boundary
-
-**What.** `src/sleef/sleef_inv_hyp_pow.cpp:550-557` flushes to ±∞ at
-`|x| > 709.78` (the `exp` overflow threshold); correct threshold for
-sinh is `log(2·DBL_MAX) ≈ 710.4758`. Insert an intermediate branch
-for `|x| ∈ (709.78, 710.4758]` that evaluates
-`sf64_internal_exp_core(|x| − LN2) * 0.5` (the `* 0.5` keeps the
-intermediate out of overflow).
-
-**Why it matters.** ±inf return is wrong across ~0.7 units of input
-width. Low-traffic regime, but a real bug.
-
-**What's needed.** Extend the sinh sweep in
-`tests/mpfr/test_mpfr_diff.cpp` with spot-check rows at
-`{709.79, 710.0, 710.4, 710.48, ±}` gated at U35 = 8.
-
-### Payne–Hanek deep-reduction coverage
-
-**What.** Append `std::ldexp(1.0, 500)` and `std::ldexp(1.0, 900)`
-to the `ks[]` array in `tests/test_transcendental_1ulp.cpp:720-724`.
-
-**Why it matters.** Matches `tests/test_coverage_mpfr.cpp:248-254`,
-which already exercises these k-values. Trivial coverage gap.
-
-**What's needed.** Line-count-trivial test edit.
-
-### Non-RNE rounding mode test parametrization
-
-**What.** The `sf64_*_r(mode, …)` surface landed in 1.1 but the
-tests still run RNE-only. Thread `mode` through the MPFR sweep
-harness (`record()` / `sweep*_uniform()` in
-`tests/mpfr/test_mpfr_diff.cpp`, mapping `sf64_rounding_mode` →
-`mpfr_rnd_t`). Add a mode loop to `tests/testfloat/run_testfloat.cpp`
-and regenerate `tests/testfloat/vectors/` per mode. Add explicit
-per-mode bit-exact rows to `tests/test_arithmetic_exact.cpp`,
-`test_sqrt_fma_exact.cpp`, `test_convert_widths.cpp` guarded by host
-FPU fenv. Add a new `fuzz/fuzz_rounding_modes.cpp` target.
-
-**Why it matters.** The non-RNE surface claims bit-exactness under
-MPFR + TestFloat but no test asserts it across all five modes.
-
-**What's needed.** Per-mode bench tracking in `CHANGELOG.md` once
-the pow cross-TU fix above lands — that refactor may re-measure the
-`_r` path cost as a side effect.
-
----
-
-## Post-1.1
-
-### Extend internal RNE surface to `fcmp` / `trunc` / `ldexp` / `frexp` / `fabs` / `neg`
-
-**What.** The 1.1 `src/internal_arith.h` exposes header-inlined RNE
-specializations for `add` / `sub` / `mul` / `div` / `fma` / `sqrt` so
-SLEEF DD primitives avoid the cross-TU public-ABI cost. `sf64_pow` still
-calls `sf64_fcmp` (×15), `sf64_trunc` (×3), `sf64_ldexp`, `sf64_frexp`,
-`sf64_fabs`, `sf64_neg` through the public ABI — on Apple Silicon each
-is a full call frame plus (in tls fenv mode) a `__tlv_get_addr`
-roundtrip. Disasm of 1.1 `sf64_pow` confirms these are the remaining
-`bl` sites after the 1.1 refactor.
-
-**Why it matters.** Pow's residual +27% (disabled) / +30% (tls) vs the
-1.0 baseline is dominated by these cross-TU calls. Inlining them closes
-the `sf64_pow` gap further — rough projection based on the bl census is
-~5–10 percentage points of delta reduction. Also shrinks any
-transcendental that composes on `fcmp` / `fabs` for NaN / sign gating.
-
-**What's needed.** Add hidden-visibility header-inlined RNE helpers
-`sf64_internal_{fcmp,trunc,ldexp,frexp,fabs,neg}` in
-`src/internal_arith.h` (or a sibling header if the file grows too
-large). Rewire `src/sleef/*.cpp` call sites to the internal helpers via
-the existing `sf64_*` macro pattern in `src/sleef/sleef_fe_macros.h`.
-Public `sf64_{fcmp,trunc,…}` stay unchanged (ABI is sacrosanct). No
-test or oracle changes — bit-exactness is preserved by construction
-since the inline helpers are lifts of the existing bodies. Verify with
-full `ctest` in both fenv modes and a fresh `sf64_pow` bench delta.
-
-### Tighten `erf` / `erfc` / `tgamma` to U10 or U35
-
-**What.** These currently gate at GAMMA (≤1024 ULP); SLEEF upstream
-has tighter coefficient sets and extra range-reduction branches for
-them.
-
-**Why it matters.** Biggest accuracy gap a scientific consumer would
-actually hit. Removes the loudest "is this really libm-grade?"
-objection — medium-effort, high-credibility payoff.
-
-**What's needed.** Port the higher-degree minimax polynomials and the
-range-reduction branches onto the existing `sf64_*` primitives in
-`src/sleef/`. Rewire the MPFR diff harness at the new bound; demote
-the gate in `tests/mpfr/test_mpfr_diff.cpp`. Update the README
-precision table.
-
-### `sf64_lgamma` zero-crossings on `(0.5, 3)`
-
-**What.** `lgamma(x)` vanishes at `x = 1` and `x = 2`; near those
-zeros the result is O(1e-5) while the absolute error floor of any
-log-of-Γ path is O(ulp(1)) ≈ 2.2e-16, so the ULP ratio blows past
-GAMMA = 1024 regardless of ingredient precision. The 1.1 `logk_dd`
-rewrite (if it lands) will confirm the issue is algorithmic, not
-ingredient-precision.
-
-**Why it matters.** Currently report-only in
-`tests/experimental/experimental_precision.cpp` with a README caveat;
-needs to become a hard gate to close the claim.
-
-**What's needed.** Zero-centered Taylor expansion around `x = 1` and
-`x = 2` — a branch inside `sf64_lgamma` that detects the vanishing
-regime and returns `(x-1)·P₁(x)` / `(x-2)·P₂(x)` with coefficients
-from the known series for `ψ(x)`. After the rewrite lands, graduate
-the sweep to the shipped suite at GAMMA tier and drop the README
-caveat.
-
-### `SOFT_FP64_FENV=explicit` caller-state ABI — landed (post-1.1)
-
-**Status.** Shipped. `SOFT_FP64_FENV=explicit` now selects a parallel
-`sf64_*_ex` surface that takes an `sf64_fe_state_t*` directly. Under
-that mode the thread_local storage is omitted entirely (so consumers
-like Apple Metal / WebGPU / OpenCL device code, where `thread_local`
-is unavailable, can link). The legacy TLS surface stays in place as
-no-op stubs so adapters that mix and match both ABIs still link.
-Wired into the TestFloat runner under `SF64_TEST_FENV_MODE=2` —
-38.7M-vector flag gate green; `test_fenv` exercises the `_ex` round-
-trip (raise / clear / save / restore + null-pointer fast path).
-
-**Surface.** `sf64_add_ex / sub_ex / mul_ex / div_ex / sqrt_ex /
-fma_ex` (RNE) and their `_r_ex` mode-parametrized variants;
-`sf64_to_f32_ex / from_iN_ex / to_iN_ex / from_uN_ex / to_uN_ex`
-plus `_r_ex` for the conversion ops; `sf64_fe_getall_ex / test_ex /
-raise_ex / clear_ex / save_ex / restore_ex`. `sf64_remainder` /
-`sf64_fmod` (sleef-side) deliberately do not get `_ex` variants —
-the runner skips their flag check under explicit mode (the bit-
-exact value gate still runs at full corpus size). Adding `_ex`
-into `src/sleef/` is parked under the OpenCL semantics mode work.
-
-**Follow-up (small).** `sf64_internal_round_pack` is still mode-
-plumbed by-reference accumulator only; future work could thread
-the state pointer through transcendentals so `sf64_pow_ex`, etc.,
-become possible. Not blocking GPU consumers — the arithmetic
-surface is what the SSCP / Metal / WebGPU emitters actually call.
+**What's needed.** New `SOFT_FP64_SNAN_PROPAGATE` build option (default
+OFF — preserves current behaviour) gating the payload-preserving path
+in `propagate_nan` and the four sites that quiet a NaN without going
+through it (`sf64_internal_sqrt_rne`, `sf64_internal_fma_rne`,
+`to_f32_impl`, `from_f32_impl`). `sf64_sub` / `sf64_sub_r`'s
+b-operand sign XOR-flip needs a sNaN-aware fast-path so the propagated
+sign survives. `sf64_fmod` / `sf64_remainder` need a payload-bearing
+`propagate_nan_xy(x, y)` helper. New
+`tests/test_snan_payload.cpp` for bit-exact spot-checks across
+`add` / `sub` / `mul` / `div` / `sqrt` / `fma` / `from_f32` under
+both option states; un-skip any remaining payload-specific TestFloat
+rows under the option.
 
 ### OpenCL C semantics mode
 
@@ -312,46 +62,15 @@ under the new mode. New test tier in
 `tests/mpfr/test_mpfr_diff.cpp` for the flushed edges. Adapter
 forwarders `__acpp_sscp_native_*_f64` → `sf64_native_*`. README +
 NOTICE updates; document conformance against OpenCL 3.0 full
-profile. Not in scope: directed rounding (already covered by the
-`sf64_*_r` surface), `half_*` / single-precision variants (different
-library), fenv exception flags (OpenCL has no `<fenv.h>` equivalent;
+profile. Adding `_ex` variants for `sf64_remainder` / `sf64_fmod`
+in `src/sleef/` lives under this work too — the SLEEF surface
+deliberately stays out of the 1.2 explicit-state lift to keep the
+diff bounded.
+
+Not in scope: directed rounding (already covered by the `sf64_*_r`
+surface), `half_*` / single-precision variants (different library),
+fenv exception flags (OpenCL has no `<fenv.h>` equivalent;
 `disabled` is the OpenCL-matching fenv setting).
-
-### Portable 64×64→128 multiply in `sf64_fma`
-
-**What.** `src/sqrt_fma.cpp` assumes the compiler provides
-`__uint128_t`. Replace with a portable 64×64→128 via four 32-bit
-partials, gated on `#ifndef __SIZEOF_INT128__`.
-
-**Why it matters.** The hard dependency blocks 32-bit MCUs, MSVC, and
-some WASM toolchains — exactly the target matrix soft-fp64 is
-supposed to widen. ~40 lines, the SoftFloat reference has the exact
-pattern.
-
-**What's needed.** Implementation plus a CI cell that builds under a
-toolchain without `__uint128_t` (cheapest option: MSVC on Windows,
-or a wasm32 target). Numerical claim stays bit-exact — the two paths
-compute identical bits by construction; a ctest run covers both.
-
-### sNaN payload preservation
-
-**What.** Today sNaN → qNaN on entry with a canonical payload; 1.1
-raises `SF64_FE_INVALID` on that entry when fenv is enabled. IEEE
-754 §6.2 allows preserving the signalling-payload bits through the
-quiet-bit force.
-
-**Why it matters.** The last TestFloat vectors currently skipped are
-the documented sNaN carve-out in `tests/testfloat/run_testfloat.cpp`.
-Un-skipping them lets the README claim 100% of 7.16M vectors pass —
-a real credibility line. The preservation itself is completeness
-work for most consumers (§6.2 is implementation-defined), but the
-change is ~5 lines in `internal.h:144-158` (preserve bits 50:0, set
-bit 51).
-
-**What's needed.** New `SOFT_FP64_SNAN_PROPAGATE` build option
-gating the payload-preserving path; un-skip the TestFloat sNaN rows
-under it; add a handful of bit-exact spot-checks for payload
-survival across each arithmetic entry.
 
 ### `soft-fp128` sibling
 

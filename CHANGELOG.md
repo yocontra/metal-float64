@@ -7,6 +7,165 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Every numeric claim in this file traces to a specific CI-gated sweep.
 See `README.md` for the full precision table.
 
+## [1.2.0] — 2026-04-26
+
+Substantial release. Closes the AGX recursion-hang surfaced by
+AdaptiveCpp's Metal pipeline, pulls all the open `Post-1.1` numerical
+work onto the shipped surface, and lands the `SOFT_FP64_FENV=explicit`
+caller-state ABI that GPU / SIMT consumers need (Metal, WebGPU, OpenCL
+device code — anywhere `thread_local` is unavailable). The
+`CMakeLists.txt` project version was also bumped from the stale `1.0.0`
+pin to `1.2.0` so `find_package(soft_fp64)` reports the right value.
+
+### Fixed
+
+- **`SF64_NO_OPT` hardening on AGX cycle-risk ABI bodies.** Clang `-O3`
+  InstCombine pattern-matches the bit-twiddle bodies of `sf64_fabs`,
+  `sf64_copysign`, `sf64_neg`, and the inlined predicates inside
+  `sf64_fcmp` back into `llvm.fabs.f64` / `llvm.copysign.f64` /
+  `fneg double` / `fcmp <pred> double`. AdaptiveCpp's Metal emitter
+  then routes those intrinsics through `__acpp_sscp_*_f64` wrappers
+  whose bodies delegate back to the same `sf64_*` symbols — infinite
+  mutual recursion that silently watchdog-hangs Apple Silicon AGX
+  (`kIOGPUCommandBufferCallbackErrorHang`). New `SF64_NO_OPT
+  __attribute__((optnone))` macro (clang-only; defined in
+  `include/soft_fp64/defines.h`) applied to the four cycle-risk
+  function definitions keeps the integer ops intact through
+  optimization. Verified via `llvm-dis` on the staged adapter
+  sources: each of `@sf64_fabs` / `@sf64_copysign` / `@sf64_neg` /
+  `@sf64_fcmp` emits pure integer ops with zero `llvm.fabs.f64` /
+  `llvm.copysign.f64` / `fneg double` / `fcmp <pred> double` in its
+  body.
+- **Metal adapter staging — missing `internal_arith.h`.** The 1.1
+  inline-RNE refactor introduced `src/internal_arith.h` (a hidden-
+  visibility header pulled in by `arithmetic.cpp`), but
+  `adapters/acpp_metal/` staging was never updated to copy it. Result:
+  configure-time-clean / build-time-broken Metal bitcode pipeline on
+  any fresh checkout that enabled the adapter. Now staged verbatim
+  alongside `internal.h`.
+- **Metal adapter fenv mode — forced demotion to `disabled` under
+  `tls`.** Metal Shading Language has no `thread_local` storage class,
+  so the `tls` mode (which compiles `extern thread_local unsigned
+  sf64_internal_fe_flags`) cannot be honored on the GPU side. The
+  staged Metal bitcode sources are now forced to `disabled` with a
+  visible `message(STATUS …)` warning so a user who asked for fenv
+  flags on Metal sees that the bitcode side could not deliver. The
+  host-side forwarder link-smoke archive keeps the actual core mode —
+  TLS works fine on the host.
+- **`sf64_*` raises `SF64_FE_INVALID` on sNaN inputs.** Per IEEE 754
+  §7.2 every arithmetic / sqrt / fma / convert / fmod / remainder
+  operation that takes a sNaN operand must raise INVALID. Previously
+  the public ops quietly routed the sNaN through `propagate_nan()`
+  with no flag side-effect. Now wired through every relevant path —
+  `sf64_internal_{add,mul,div,sqrt,fma}_rne`, the mode-parametric
+  `_r` paths in `arithmetic.cpp`, `sqrt_fma.cpp`, the f32→f64 / f64→
+  f32 paths in `convert.cpp`, and `sf64_fmod` / `sf64_remainder` in
+  `src/sleef/sleef_inv_hyp_pow.cpp`. `sf64_neg` / `sf64_fabs` /
+  `sf64_copysign` deliberately do **not** raise per IEEE 754 §6.3
+  (non-arithmetic operations).
+- **TestFloat sNaN-input carve-out lifted.** Removed
+  `is_snan_f64_bits` / `is_snan_f32_bits` helpers and the
+  `if (kFlagsActive && !has_snan_input)` guard from all 9 runners in
+  `tests/testfloat/run_testfloat.cpp`. Every Berkeley TestFloat
+  vector — including sNaN-input rows that previously skipped the
+  `fl2` flag check — now goes through the unconditional gate. The
+  earlier 1.1.0 prose claim of "full-corpus validation against
+  TestFloat 3e's `fl2` column (7.16M vectors)" is now factually true.
+- **`CMakeLists.txt` project version pinned at `1.0.0` through 1.1.0.**
+  Bumped to `1.2.0` in this release; `find_package(soft_fp64)` now
+  reports the shipped tag. The 1.0.0 pin had survived the 1.1.0
+  release commit, so anyone consuming via CMake saw `1.0.0` against a
+  v1.1.0 archive.
+
+### Added
+
+- **`tests/test_fenv_threads.cpp` — TLS accumulator thread-safety test.**
+  Two-thread stress: Thread A raises only `INVALID` (`sf64_div(0,0)`),
+  Thread B raises only `DIVBYZERO` (`sf64_div(1.0, 0.0)`); 10 000
+  iterations per thread; `std::atomic` rendezvous (no `sleep()`); per-
+  iter clear-then-op-then-assert-exact-bit. Asserts no cross-thread
+  bit leakage. Compiles to a no-op stub under
+  `SOFT_FP64_FENV=disabled`. ThreadSanitizer-clean on AppleClang.
+- **Portable 64×64 → 128 multiply for `sf64_fma`.** Previously
+  `__uint128_t` was assumed; MSVC, some wasm32 toolchains, and 32-bit
+  MCU SDKs do not provide it. New `mul64x64_to_128` primitive in
+  `src/internal.h` carries either a native `__uint128_t` multiply or
+  a portable schoolbook (four 32×32→64 partial products carry-
+  propagated through the middle column, mirroring Berkeley SoftFloat
+  3e `s_mul64To128.c`). Selection gate: native if `__SIZEOF_INT128__`
+  is defined and `SF64_FORCE_PORTABLE_U128` is not. The new
+  `build-test-portable-u128` CI cell (Ubuntu 24.04, clang Release,
+  `-DSF64_FORCE_PORTABLE_U128=1`) runs the full ctest tree under the
+  schoolbook path so it stays linked, exercised, and bit-for-bit
+  identical to the native path.
+- **Internal classify / manipulate helpers.** New
+  `src/internal_classify.h` exposes hidden-visibility, header-inlined
+  lifts of `sf64_{fcmp,trunc,ldexp,frexp,fabs}` so SLEEF DD primitives
+  avoid the cross-TU public-ABI cost on these entries. `sf64_pow`
+  alone made ~12 cross-TU calls to these symbols (each a full call
+  frame plus a `__tlv_get_addr` roundtrip in tls fenv mode). After
+  the rewire `sf64_pow` body's `bl` census drops from 12 to 3
+  (remaining: `sf64_internal_logk_dd`, `sf64_internal_expk_dd`, and
+  the fenv TLS thunk). Public `sf64_{fcmp,trunc,fabs,ldexp,frexp,
+  neg}` unchanged. The `SF64_NO_OPT` optnone hardening on the
+  cycle-risk public entries is preserved — internal helpers are a
+  parallel surface, not a replacement.
+- **`SOFT_FP64_FENV=explicit` caller-state ABI.** Parallel
+  `sf64_*_ex(..., sf64_fe_state_t* state)` surface mirroring the
+  default arithmetic / sqrt / fma / convert ABI. The state pointer
+  receives the OR'd flag bits directly (a null pointer drops flags);
+  thread-local storage is omitted entirely under explicit mode, so
+  Apple Metal / WebGPU / OpenCL device kernels — where
+  `thread_local` is not available — can finally observe fenv flags.
+  Includes `sf64_fe_*_ex(state, ...)` for raise/clear/save/restore/
+  getall/test, plus `sf64_*_r_ex` mode-parametric variants and
+  `sf64_from_f32_ex`. The default TLS surface is unchanged under
+  `SOFT_FP64_FENV=tls` and compiles to no-op stubs under `explicit`.
+  New `build-test-fenv-explicit` CI cell exercises the `_ex` ABI
+  end-to-end (38 M+ TestFloat vectors, full flag check on the
+  arithmetic / sqrt / fma / convert surface).
+
+### Tightened
+
+- **`erf`, `erfc`, `tgamma`, `lgamma` → U10 (≤ 4 ULP).** Ports of
+  SLEEF 3.6 `xerf_u1` / `xerfc_u15` / `xtgamma_u1` / `xlgamma_u1`
+  faithfully into `src/sleef/sleef_stubs.cpp`; coefficients
+  transcribed verbatim from upstream `sleefdp.c`. Polynomial
+  evaluation uses the existing `poly_array` helper (Horner) instead
+  of upstream's Estrin POLY21 — value-equivalent but slightly looser
+  intermediate rounding, which is why the target tier is U10 not u1.
+  Three new cross-TU internal helpers (hidden visibility,
+  `sf64_internal_*` prefix; not on the public ABI surface) underpin
+  the ports: `sf64_internal_expk2_dd` (DD → DD exp),
+  `sf64_internal_logk2_dd` (DD → DD log) in
+  `src/sleef/sleef_inv_hyp_pow.cpp`, and `sf64_internal_sinpik_dd`
+  (double → DD sinπ) in `src/sleef/sleef_trig.cpp`. New DD
+  primitives `ddabs_dd_dd` and `ddsub_dd_dd_dd` added to
+  `src/sleef/sleef_common.h`. Was GAMMA (≤ 1024 ULP). Measured ULP
+  vs MPFR 200-bit (n = 10 000 each, see
+  `tests/mpfr/test_mpfr_diff.cpp`):
+
+  | Function | Worst observed ULP |
+  |----------|--------------------|
+  | `erf`     | 1                  |
+  | `erfc`    | 1                  |
+  | `tgamma`  | 1                  |
+  | `lgamma`  | 1 (zero-free tail) |
+  | `lgamma_r`| 1 (zero-free tail) |
+
+- **`sf64_lgamma` zero-crossings on `(0.5, 3)` graduated to the
+  shipped suite.** Was report-only in
+  `tests/experimental/experimental_precision.cpp`; now gated in
+  `tests/mpfr/test_mpfr_diff.cpp` as `lgamma_zeros` /
+  `lgamma_r_zeros` at GAMMA. The pre-fix baseline absolute error
+  exceeded 76 000 ULP near the zeros; the SLEEF u1 port drops that
+  to ≤ 4 ULP absolute (within U10 in absolute terms). The sweep
+  stays at GAMMA because the ULP *ratio* is unbounded as
+  `|lgamma| → 0` near `x = 1` and `x = 2`, even though the absolute
+  number is comfortably inside U10.
+
+[1.2.0]: https://github.com/yocontra/soft-fp64/releases/tag/v1.2.0
+
 ## [1.1.0] — 2026-04-24
 
 Additive release on top of 1.0. Three integrity-layer features land:
