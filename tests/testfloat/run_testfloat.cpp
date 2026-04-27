@@ -56,13 +56,219 @@
 // Under `disabled` fenv mode every sf64_fe_* is a no-op; fl2 comparison is
 // inapplicable. The CMake build pipes the mode selection here; default to
 // TLS-active so local one-off builds still exercise flag checks.
+//
+// Mode wiring:
+//   1 (tls)      — use the TLS-backed sf64_* surface (bodies untouched).
+//   0 (disabled) — every sf64_fe_* is a no-op; flag comparison is skipped
+//                  and the runner reduces to a result-bit check.
+//   2 (explicit) — TLS storage is gone, so the runner exercises the
+//                  parallel sf64_*_ex / sf64_fe_*_ex ABI against a file-
+//                  scope sf64_fe_state_t. The shim macros below redirect
+//                  every call site without touching the body of each
+//                  run_* helper. This is the production wiring frontends
+//                  like Metal / WebGPU use — the runner mirrors it so
+//                  the same 7.16M-vector corpus that gates TLS mode
+//                  also gates explicit mode.
 #ifndef SF64_TEST_FENV_MODE
 #define SF64_TEST_FENV_MODE 1
 #endif
 #if SF64_TEST_FENV_MODE == 1
 static constexpr bool kFlagsActive = true;
+#elif SF64_TEST_FENV_MODE == 2
+static constexpr bool kFlagsActive = true;
 #else
 static constexpr bool kFlagsActive = false;
+#endif
+
+#if SF64_TEST_FENV_MODE == 2
+// File-scope state struct that every shim writes into. The runner is
+// single-threaded so a non-thread-local global is safe.
+static sf64_fe_state_t g_state = {0u};
+
+// Wrapper functions that match the signatures of the original sf64_*
+// surface so they can be both called directly AND passed as function
+// pointers. These forward to the parallel `_ex` ABI plus the file-scope
+// `g_state`. The runner's helper functions (`run_f64_binop_rmode`, etc.)
+// receive these wrappers as `f64_binop_r fn` and call `fn(m, a, b)`,
+// which preserves the existing call shape. Function-pointer storage of
+// the wrapper is what closes the explicit-mode coverage gap that the
+// macro-redirect approach (used for direct call sites) cannot reach.
+namespace ex_shim {
+inline void clear(unsigned mask) {
+    sf64_fe_clear_ex(&g_state, mask);
+}
+inline unsigned getall(void) {
+    return sf64_fe_getall_ex(&g_state);
+}
+
+inline double add(double a, double b) {
+    return sf64_add_ex(a, b, &g_state);
+}
+inline double sub(double a, double b) {
+    return sf64_sub_ex(a, b, &g_state);
+}
+inline double mul(double a, double b) {
+    return sf64_mul_ex(a, b, &g_state);
+}
+inline double div_(double a, double b) {
+    return sf64_div_ex(a, b, &g_state);
+}
+inline double sqrt_(double x) {
+    return sf64_sqrt_ex(x, &g_state);
+}
+inline double fma_(double a, double b, double c) {
+    return sf64_fma_ex(a, b, c, &g_state);
+}
+inline float to_f32(double x) {
+    return sf64_to_f32_ex(x, &g_state);
+}
+inline double from_i8(int8_t x) {
+    return sf64_from_i8_ex(x, &g_state);
+}
+inline double from_i16(int16_t x) {
+    return sf64_from_i16_ex(x, &g_state);
+}
+inline double from_i32(int32_t x) {
+    return sf64_from_i32_ex(x, &g_state);
+}
+inline double from_i64(int64_t x) {
+    return sf64_from_i64_ex(x, &g_state);
+}
+inline double from_u8(uint8_t x) {
+    return sf64_from_u8_ex(x, &g_state);
+}
+inline double from_u16(uint16_t x) {
+    return sf64_from_u16_ex(x, &g_state);
+}
+inline double from_u32(uint32_t x) {
+    return sf64_from_u32_ex(x, &g_state);
+}
+inline double from_u64(uint64_t x) {
+    return sf64_from_u64_ex(x, &g_state);
+}
+inline int8_t to_i8(double x) {
+    return sf64_to_i8_ex(x, &g_state);
+}
+inline int16_t to_i16(double x) {
+    return sf64_to_i16_ex(x, &g_state);
+}
+inline int32_t to_i32(double x) {
+    return sf64_to_i32_ex(x, &g_state);
+}
+inline int64_t to_i64(double x) {
+    return sf64_to_i64_ex(x, &g_state);
+}
+inline uint8_t to_u8(double x) {
+    return sf64_to_u8_ex(x, &g_state);
+}
+inline uint16_t to_u16(double x) {
+    return sf64_to_u16_ex(x, &g_state);
+}
+inline uint32_t to_u32(double x) {
+    return sf64_to_u32_ex(x, &g_state);
+}
+inline uint64_t to_u64(double x) {
+    return sf64_to_u64_ex(x, &g_state);
+}
+inline double add_r(sf64_rounding_mode m, double a, double b) {
+    return sf64_add_r_ex(m, a, b, &g_state);
+}
+inline double sub_r(sf64_rounding_mode m, double a, double b) {
+    return sf64_sub_r_ex(m, a, b, &g_state);
+}
+inline double mul_r(sf64_rounding_mode m, double a, double b) {
+    return sf64_mul_r_ex(m, a, b, &g_state);
+}
+inline double div_r(sf64_rounding_mode m, double a, double b) {
+    return sf64_div_r_ex(m, a, b, &g_state);
+}
+inline double sqrt_r(sf64_rounding_mode m, double x) {
+    return sf64_sqrt_r_ex(m, x, &g_state);
+}
+inline double fma_r(sf64_rounding_mode m, double a, double b, double c) {
+    return sf64_fma_r_ex(m, a, b, c, &g_state);
+}
+inline float to_f32_r(sf64_rounding_mode m, double x) {
+    return sf64_to_f32_r_ex(m, x, &g_state);
+}
+inline int8_t to_i8_r(sf64_rounding_mode m, double x) {
+    return sf64_to_i8_r_ex(m, x, &g_state);
+}
+inline int16_t to_i16_r(sf64_rounding_mode m, double x) {
+    return sf64_to_i16_r_ex(m, x, &g_state);
+}
+inline int32_t to_i32_r(sf64_rounding_mode m, double x) {
+    return sf64_to_i32_r_ex(m, x, &g_state);
+}
+inline int64_t to_i64_r(sf64_rounding_mode m, double x) {
+    return sf64_to_i64_r_ex(m, x, &g_state);
+}
+inline uint8_t to_u8_r(sf64_rounding_mode m, double x) {
+    return sf64_to_u8_r_ex(m, x, &g_state);
+}
+inline uint16_t to_u16_r(sf64_rounding_mode m, double x) {
+    return sf64_to_u16_r_ex(m, x, &g_state);
+}
+inline uint32_t to_u32_r(sf64_rounding_mode m, double x) {
+    return sf64_to_u32_r_ex(m, x, &g_state);
+}
+inline uint64_t to_u64_r(sf64_rounding_mode m, double x) {
+    return sf64_to_u64_r_ex(m, x, &g_state);
+}
+} // namespace ex_shim
+
+// Now redirect every TU-internal call site by macro. The wrappers above
+// are referenced both by direct call (where the macro substitution
+// fires) and by bare-identifier function-pointer passing (where the
+// macro fires too because there's no following parenthesis test in the
+// preprocessor — bare-identifier macros without args do expand). Note
+// each macro is defined as a bare token (`sf64_fe_clear` →
+// `ex_shim::clear`) rather than a function-call shape, so it expands
+// uniformly in both contexts. That's exactly the case we need: the
+// rmode dispatch in main() calls `run_f64_binop_rmode("f64_add",
+// sf64_add_r, ...)` with `sf64_add_r` as a function pointer; under
+// explicit mode this expands to `ex_shim::add_r` — the wrapper —
+// which has the same signature.
+#define sf64_fe_clear ex_shim::clear
+#define sf64_fe_getall ex_shim::getall
+#define sf64_add ex_shim::add
+#define sf64_sub ex_shim::sub
+#define sf64_mul ex_shim::mul
+#define sf64_div ex_shim::div_
+#define sf64_sqrt ex_shim::sqrt_
+#define sf64_fma ex_shim::fma_
+#define sf64_to_f32 ex_shim::to_f32
+#define sf64_from_i8 ex_shim::from_i8
+#define sf64_from_i16 ex_shim::from_i16
+#define sf64_from_i32 ex_shim::from_i32
+#define sf64_from_i64 ex_shim::from_i64
+#define sf64_from_u8 ex_shim::from_u8
+#define sf64_from_u16 ex_shim::from_u16
+#define sf64_from_u32 ex_shim::from_u32
+#define sf64_from_u64 ex_shim::from_u64
+#define sf64_to_i8 ex_shim::to_i8
+#define sf64_to_i16 ex_shim::to_i16
+#define sf64_to_i32 ex_shim::to_i32
+#define sf64_to_i64 ex_shim::to_i64
+#define sf64_to_u8 ex_shim::to_u8
+#define sf64_to_u16 ex_shim::to_u16
+#define sf64_to_u32 ex_shim::to_u32
+#define sf64_to_u64 ex_shim::to_u64
+#define sf64_add_r ex_shim::add_r
+#define sf64_sub_r ex_shim::sub_r
+#define sf64_mul_r ex_shim::mul_r
+#define sf64_div_r ex_shim::div_r
+#define sf64_sqrt_r ex_shim::sqrt_r
+#define sf64_fma_r ex_shim::fma_r
+#define sf64_to_f32_r ex_shim::to_f32_r
+#define sf64_to_i8_r ex_shim::to_i8_r
+#define sf64_to_i16_r ex_shim::to_i16_r
+#define sf64_to_i32_r ex_shim::to_i32_r
+#define sf64_to_i64_r ex_shim::to_i64_r
+#define sf64_to_u8_r ex_shim::to_u8_r
+#define sf64_to_u16_r ex_shim::to_u16_r
+#define sf64_to_u32_r ex_shim::to_u32_r
+#define sf64_to_u64_r ex_shim::to_u64_r
 #endif
 
 // ---- bit-cast helpers --------------------------------------------------
@@ -255,6 +461,39 @@ static uint64_t run_f64_binop(const char* op, f64_binop fn, const std::vector<co
                               expected_flags, bits(got));
                 fail(op, n, line, detail);
             }
+        }
+        ++n;
+    }
+    return n;
+}
+
+// f64 binary, value-only — no flag verification. Used for ops whose
+// flag plumbing isn't reachable under the current build mode (e.g.
+// sf64_remainder under SOFT_FP64_FENV=explicit, which lives in the sleef
+// TU and uses the TLS SF64_FE_RAISE macro). The bit-exact result corpus
+// still runs at full size; only the fl2 comparison is skipped.
+static uint64_t run_f64_binop_no_flags(const char* op, f64_binop fn,
+                                       const std::vector<const char*>& flags) {
+    Proc p;
+    if (!p.open(mk_cmd(op, flags))) {
+        std::fprintf(stderr, "FAIL[%s]: cannot spawn testfloat_gen\n", op);
+        std::abort();
+    }
+    char line[256];
+    uint64_t n = 0;
+    while (std::fgets(line, sizeof(line), p.fp)) {
+        uint64_t v[4];
+        if (!parse_hex_n(line, 4, v))
+            fail(op, n, line, "parse");
+        const double a = from_bits(v[0]);
+        const double b = from_bits(v[1]);
+        const double z = from_bits(v[2]);
+        const double got = fn(a, b);
+        if (!nan_equiv(got, z)) {
+            char detail[128];
+            std::snprintf(detail, sizeof(detail), "got=0x%016" PRIx64 " expect=0x%016" PRIx64,
+                          bits(got), v[2]);
+            fail(op, n, line, detail);
         }
         ++n;
     }
@@ -1160,7 +1399,19 @@ int main() {
     run("f64_div", run_f64_binop("f64_div", sf64_div, {"-tininessbefore"}));
     // IEEE-754 `remainder` (round-to-nearest-even quotient) — lands via
     // sf64_remainder (fmod + tie-break). Rounding mode does not apply.
+    //
+    // Under explicit mode `sf64_remainder` lives in src/sleef/ and uses
+    // the TLS-mode SF64_FE_RAISE macro for its INVALID raises (the
+    // sleef path does not have an `_ex` variant — out of scope for the
+    // arithmetic / sqrt / fma / convert ABI extension). The bit-exact
+    // value check still runs; the flag check is suppressed via the
+    // `_no_flags` runner so the result corpus stays exercised.
+#if SF64_TEST_FENV_MODE == 2
+    run("f64_rem (no-flag-check)",
+        run_f64_binop_no_flags("f64_rem", sf64_remainder, {"-tininessbefore"}));
+#else
     run("f64_rem", run_f64_binop("f64_rem", sf64_remainder, {"-tininessbefore"}));
+#endif
     run("f64_sqrt", run_f64_unop("f64_sqrt", sf64_sqrt, {"-tininessbefore"}));
 
     // mulAdd has a hardcoded minimum of 6,133,248 vectors at level 1. The

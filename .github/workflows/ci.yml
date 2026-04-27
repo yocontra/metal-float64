@@ -105,10 +105,10 @@ jobs:
   # ---------------------------------------------------------------------------
   # 1b. SOFT_FP64_FENV=disabled build + ctest.
   #
-  # 1.1 ships the fenv surface with a three-way mode switch:
+  # soft-fp64 ships the fenv surface with a three-way mode switch:
   #   tls      — thread_local flag accumulator (default on hosted)
   #   disabled — SF64_FE_RAISE compiles to (void)0; sf64_fe_* return 0
-  #   explicit — reserved for 1.2+ caller-state ABI (currently same as disabled)
+  #   explicit — caller-state `sf64_*_ex` parallel ABI (1.2+, GPU-friendly)
   #
   # The matrix above uses the tls default. This cell exercises the disabled
   # path so a stray reference to `sf64_internal_fe_flags` outside the
@@ -188,6 +188,45 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build-portable-u128 -V --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # 1d. SOFT_FP64_FENV=explicit build + ctest.
+  #
+  # Exercises the parallel `sf64_*_ex` caller-state ABI. Under explicit mode
+  # the thread_local storage is omitted entirely (so consumers like Apple
+  # Metal / WebGPU GPU kernels, where `thread_local` is not available, can
+  # link); the legacy TLS surface compiles to no-op stubs, and only the
+  # `_ex` surface carries flag state. The TestFloat runner under
+  # SF64_TEST_FENV_MODE=2 exercises the `_ex` ABI end-to-end (38M+ vectors,
+  # full flag check on the arithmetic / sqrt / fma / convert surface).
+  # ---------------------------------------------------------------------------
+  build-test-fenv-explicit:
+    name: build-test (fenv=explicit)
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPFR + GMP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpfr-dev libgmp-dev
+
+      - name: Configure (fenv=explicit)
+        run: |
+          cmake -B build-fenv-explicit -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DSOFT_FP64_FENV=explicit
+
+      - name: Build
+        run: cmake --build build-fenv-explicit --parallel
+
+      - name: Test
+        run: ctest --test-dir build-fenv-explicit -V --output-on-failure
 
   # ---------------------------------------------------------------------------
   # 2. ASan + UBSan (single config — no threading, so no TSan; MSan deferred).

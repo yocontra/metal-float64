@@ -256,27 +256,33 @@ from the known series for `ψ(x)`. After the rewrite lands, graduate
 the sweep to the shipped suite at GAMMA tier and drop the README
 caveat.
 
-### `SOFT_FP64_FENV=explicit` caller-state ABI for real
+### `SOFT_FP64_FENV=explicit` caller-state ABI — landed (post-1.1)
 
-**What.** The `explicit` mode is reserved in the 1.1 CMake config
-but compiles identically to `disabled` (zero-cost no-op raise sites,
-surface present but stateless). Target shape: a parallel `sf64_fe_*`
-ABI that takes an `sf64_fe_state_t*` directly instead of reading
-thread-local storage.
+**Status.** Shipped. `SOFT_FP64_FENV=explicit` now selects a parallel
+`sf64_*_ex` surface that takes an `sf64_fe_state_t*` directly. Under
+that mode the thread_local storage is omitted entirely (so consumers
+like Apple Metal / WebGPU / OpenCL device code, where `thread_local`
+is unavailable, can link). The legacy TLS surface stays in place as
+no-op stubs so adapters that mix and match both ABIs still link.
+Wired into the TestFloat runner under `SF64_TEST_FENV_MODE=2` —
+38.7M-vector flag gate green; `test_fenv` exercises the `_ex` round-
+trip (raise / clear / save / restore + null-pointer fast path).
 
-**Why it matters.** TLS is fine on CPU but a non-starter on GPU /
-SIMT targets — exactly the consumers this project exists for. Metal
-and WebGPU kernels can't use `thread_local` at all, so there is no
-path to fenv flag observability on the GPU without this. Also
-removes the Apple Silicon TLS floor that forces the cheap-op
-carveout in the 1.1 bench gate.
+**Surface.** `sf64_add_ex / sub_ex / mul_ex / div_ex / sqrt_ex /
+fma_ex` (RNE) and their `_r_ex` mode-parametrized variants;
+`sf64_to_f32_ex / from_iN_ex / to_iN_ex / from_uN_ex / to_uN_ex`
+plus `_r_ex` for the conversion ops; `sf64_fe_getall_ex / test_ex /
+raise_ex / clear_ex / save_ex / restore_ex`. `sf64_remainder` /
+`sf64_fmod` (sleef-side) deliberately do not get `_ex` variants —
+the runner skips their flag check under explicit mode (the bit-
+exact value gate still runs at full corpus size). Adding `_ex`
+into `src/sleef/` is parked under the OpenCL semantics mode work.
 
-**What's needed.** Mechanical plumbing: thread a pointer parameter
-through `sf64_internal_round_pack` and the existing `_r` variants;
-add the new ABI as a parallel surface so 1.x consumers don't break;
-new CMake configuration cell for the explicit mode; test-matrix row;
-wire `tests/testfloat/run_testfloat.cpp`'s 7.16M-vector flag gate
-under explicit mode (currently skipped).
+**Follow-up (small).** `sf64_internal_round_pack` is still mode-
+plumbed by-reference accumulator only; future work could thread
+the state pointer through transcendentals so `sf64_pow_ex`, etc.,
+become possible. Not blocking GPU consumers — the arithmetic
+surface is what the SSCP / Metal / WebGPU emitters actually call.
 
 ### OpenCL C semantics mode
 

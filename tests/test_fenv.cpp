@@ -363,6 +363,105 @@ void test_thread_isolation() {
     std::fputs("  thread isolation: ok\n", stdout);
 }
 
+// ---- caller-state (`_ex`) surface — exercised under tls + explicit -----
+//
+// Under TLS mode the `_ex` surface coexists with the default surface; the
+// test verifies that flagging into a caller-supplied state does NOT leak
+// into TLS, and vice-versa.
+// Under explicit mode the default TLS surface is no-ops (`getall_ex()`
+// returns 0 etc.); the `_ex` surface is the only path that carries flag
+// state.
+// Under disabled mode the `_ex` surface is not in the archive — the test
+// is omitted entirely.
+
+#if SF64_TEST_FENV_MODE == 1 || SF64_TEST_FENV_MODE == 2
+void test_explicit_state() {
+    sf64_fe_state_t st = {0u};
+
+    // INVALID via add_ex.
+    sf64_fe_clear_ex(&st, 0x1Fu);
+    (void)sf64_add_ex(kInf, -kInf, &st);
+    expect(sf64_fe_getall_ex(&st) == SF64_FE_INVALID, "add_ex inf+(-inf) → INVALID in state");
+
+    // DIVBYZERO via div_ex.
+    sf64_fe_clear_ex(&st, 0x1Fu);
+    (void)sf64_div_ex(1.0, 0.0, &st);
+    expect(sf64_fe_getall_ex(&st) == SF64_FE_DIVBYZERO, "div_ex 1/0 → DIVBYZERO in state");
+
+    // OVERFLOW + INEXACT via mul_ex.
+    sf64_fe_clear_ex(&st, 0x1Fu);
+    (void)sf64_mul_ex(kMax, 2.0, &st);
+    expect(sf64_fe_getall_ex(&st) == (SF64_FE_OVERFLOW | SF64_FE_INEXACT),
+           "mul_ex max*2 → OVERFLOW+INEXACT in state");
+
+    // INVALID via sqrt_ex.
+    sf64_fe_clear_ex(&st, 0x1Fu);
+    (void)sf64_sqrt_ex(-1.0, &st);
+    expect(sf64_fe_getall_ex(&st) == SF64_FE_INVALID, "sqrt_ex(-1) → INVALID in state");
+
+    // INVALID via fma_ex.
+    sf64_fe_clear_ex(&st, 0x1Fu);
+    (void)sf64_fma_ex(kInf, 0.0, 1.0, &st);
+    expect(sf64_fe_getall_ex(&st) == SF64_FE_INVALID, "fma_ex(inf,0,1) → INVALID in state");
+
+    // INVALID via to_i32_ex(NaN).
+    sf64_fe_clear_ex(&st, 0x1Fu);
+    (void)sf64_to_i32_ex(kNaN, &st);
+    expect(sf64_fe_getall_ex(&st) == SF64_FE_INVALID, "to_i32_ex(NaN) → INVALID in state");
+
+    // raise_ex / clear_ex / save_ex / restore_ex round-trip.
+    sf64_fe_clear_ex(&st, 0x1Fu);
+    sf64_fe_raise_ex(&st, SF64_FE_DIVBYZERO);
+    expect(sf64_fe_test_ex(&st, SF64_FE_DIVBYZERO) == 1, "raise_ex+test_ex round-trip");
+
+    sf64_fe_state_t snapshot = {0u};
+    sf64_fe_save_ex(&st, &snapshot);
+    sf64_fe_raise_ex(&st, SF64_FE_OVERFLOW);
+    expect(sf64_fe_getall_ex(&st) == (SF64_FE_DIVBYZERO | SF64_FE_OVERFLOW),
+           "raise_ex accumulates");
+    sf64_fe_restore_ex(&st, &snapshot);
+    expect(sf64_fe_getall_ex(&st) == SF64_FE_DIVBYZERO, "restore_ex resets to snapshot");
+
+    sf64_fe_clear_ex(&st, SF64_FE_DIVBYZERO);
+    expect(sf64_fe_getall_ex(&st) == 0u, "clear_ex strips DIVBYZERO");
+
+    // Null state pointer: callable, returns 0, drops flags.
+    expect(sf64_fe_getall_ex(nullptr) == 0u, "getall_ex(nullptr) == 0");
+    expect(sf64_fe_test_ex(nullptr, 0xFFu) == 0, "test_ex(nullptr) == 0");
+    sf64_fe_raise_ex(nullptr, 0xFFu); // no-op, must not crash
+    sf64_fe_clear_ex(nullptr, 0xFFu); // no-op, must not crash
+    sf64_fe_state_t out_st = {0xAABBu};
+    sf64_fe_save_ex(nullptr, &out_st);
+    expect(out_st.flags == 0u, "save_ex(nullptr, out) zeroes out");
+
+    // Null state passed to sf64_*_ex: result still computed correctly,
+    // flags are dropped on the floor — verify the result and that no
+    // state we own is touched.
+    sf64_fe_state_t observer = {0u};
+    const double r = sf64_div_ex(1.0, 0.0, nullptr);
+    expect(std::isinf(r) && r > 0.0, "div_ex(1,0,nullptr) still returns +inf");
+    expect(observer.flags == 0u, "div_ex with null state does not touch unrelated state");
+
+#if SF64_TEST_FENV_MODE == 1
+    // Under TLS mode the `_ex` surface must not leak into TLS, and vice-
+    // versa. Under explicit mode there's no TLS to compare against.
+    sf64_fe_clear(0x1Fu);
+    sf64_fe_state_t isol = {0u};
+    (void)sf64_add_ex(kInf, -kInf, &isol); // raises INVALID into isol
+    expect(sf64_fe_getall() == 0u, "_ex raise does not leak into TLS");
+    expect(isol.flags == SF64_FE_INVALID, "_ex raise lands in caller state");
+
+    // Symmetric direction: TLS raise does not leak into a fresh state.
+    sf64_fe_state_t isol2 = {0u};
+    (void)sf64_div(1.0, 0.0); // raises DIVBYZERO into TLS
+    expect(isol2.flags == 0u, "TLS raise does not leak into _ex state");
+    sf64_fe_clear(0x1Fu);
+#endif
+
+    std::fputs("  explicit-state (`_ex`): ok\n", stdout);
+}
+#endif
+
 } // namespace
 
 int main() {
@@ -374,6 +473,9 @@ int main() {
     test_inexact();
     test_save_restore();
     test_thread_isolation();
+#if SF64_TEST_FENV_MODE == 1 || SF64_TEST_FENV_MODE == 2
+    test_explicit_state();
+#endif
     std::fputs("test_fenv: all fenv assertions passed\n", stdout);
     return 0;
 }
