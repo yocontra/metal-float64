@@ -87,6 +87,14 @@ SF64_ALWAYS_INLINE bool is_nan_bits(uint64_t b) noexcept {
     return extract_exp(b) == kExpMax && extract_frac(b) != 0;
 }
 
+// Signaling NaN per IEEE 754-2008 §6.2.1: NaN bits with the most-significant
+// fraction bit (bit 51, kQuietNaNBit) clear. Every arithmetic op that takes a
+// sNaN input must raise SF64_FE_INVALID (IEEE 754 §7.2). The callers raise
+// before forwarding to propagate_nan, which quiets the payload.
+SF64_ALWAYS_INLINE bool is_snan_bits(uint64_t b) noexcept {
+    return is_nan_bits(b) && (b & kQuietNaNBit) == 0;
+}
+
 SF64_ALWAYS_INLINE bool is_inf_bits(uint64_t b) noexcept {
     return extract_exp(b) == kExpMax && extract_frac(b) == 0;
 }

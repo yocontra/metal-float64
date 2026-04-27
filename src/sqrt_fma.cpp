@@ -132,6 +132,10 @@ SF64_ALWAYS_INLINE double sqrt_r_impl(double x, sf64_rounding_mode mode,
         if (frac != 0) {
             // NaN -> quieted NaN (propagate payload, set quiet bit).
             // SAFETY: bitwise OR on uint64, bit-cast back to double — no FPU.
+            // IEEE 754 §7.2: sqrt(sNaN) raises INVALID.
+            if (is_snan_bits(bx)) {
+                fe.raise(SF64_FE_INVALID);
+            }
             return from_bits(bx | kQuietNaNBit);
         }
         // Infinity.
@@ -565,6 +569,10 @@ SF64_ALWAYS_INLINE double fma_r_impl(double a, double b, double c, sf64_rounding
     if (a_nan || b_nan || c_nan) {
         // IEEE 754: fma(inf, 0, qNaN) returns qNaN (even though inf*0 would
         // be invalid). We return a quieted NaN from the first NaN operand.
+        // IEEE 754 §7.2: any sNaN input raises INVALID.
+        if (is_snan_bits(ba) || is_snan_bits(bb) || is_snan_bits(bc)) {
+            fe.raise(SF64_FE_INVALID);
+        }
         if (a_nan)
             return from_bits(ba | kQuietNaNBit);
         if (b_nan)

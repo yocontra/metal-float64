@@ -320,6 +320,10 @@ SF64_ALWAYS_INLINE double sf64_internal_add_rne(double a, double b,
     const uint32_t b_sign = extract_sign(bb);
 
     if (is_nan_bits(ab) || is_nan_bits(bb)) {
+        // IEEE 754 §7.2: any arithmetic op on a sNaN raises INVALID.
+        if (is_snan_bits(ab) || is_snan_bits(bb)) {
+            fe.raise(SF64_FE_INVALID);
+        }
         return propagate_nan(ab, bb);
     }
 
@@ -371,8 +375,12 @@ SF64_ALWAYS_INLINE double sf64_internal_mul_rne(double a, double b,
     const uint32_t a_exp = extract_exp(ab);
     const uint32_t b_exp = extract_exp(bb);
 
-    if (is_nan_bits(ab) || is_nan_bits(bb))
+    if (is_nan_bits(ab) || is_nan_bits(bb)) {
+        if (is_snan_bits(ab) || is_snan_bits(bb)) {
+            fe.raise(SF64_FE_INVALID);
+        }
         return propagate_nan(ab, bb);
+    }
 
     if (a_exp == kExpMax || b_exp == kExpMax) {
         if (is_zero_bits(ab) || is_zero_bits(bb)) {
@@ -398,8 +406,12 @@ SF64_ALWAYS_INLINE double sf64_internal_div_rne(double a, double b,
     const uint32_t a_exp = extract_exp(ab);
     const uint32_t b_exp = extract_exp(bb);
 
-    if (is_nan_bits(ab) || is_nan_bits(bb))
+    if (is_nan_bits(ab) || is_nan_bits(bb)) {
+        if (is_snan_bits(ab) || is_snan_bits(bb)) {
+            fe.raise(SF64_FE_INVALID);
+        }
         return propagate_nan(ab, bb);
+    }
 
     const bool a_inf = (a_exp == kExpMax);
     const bool b_inf = (b_exp == kExpMax);
@@ -478,6 +490,10 @@ SF64_ALWAYS_INLINE double sf64_internal_sqrt_rne(double x, sf64_internal_fe_acc&
 
     if (exp_biased == kExpMax) {
         if (frac != 0) {
+            // IEEE 754 §7.2: sqrt(sNaN) raises INVALID.
+            if (is_snan_bits(bx)) {
+                fe.raise(SF64_FE_INVALID);
+            }
             return from_bits(bx | kQuietNaNBit);
         }
         if (sign != 0) {
@@ -695,6 +711,11 @@ SF64_ALWAYS_INLINE double sf64_internal_fma_rne(double a, double b, double c,
     }
 
     if (a_nan || b_nan || c_nan) {
+        // IEEE 754 §7.2: any sNaN input raises INVALID, regardless of which
+        // operand carries the propagated payload.
+        if (is_snan_bits(ba) || is_snan_bits(bb) || is_snan_bits(bc)) {
+            fe.raise(SF64_FE_INVALID);
+        }
         if (a_nan)
             return from_bits(ba | kQuietNaNBit);
         if (b_nan)

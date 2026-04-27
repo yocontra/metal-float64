@@ -57,6 +57,16 @@ SF64_ALWAYS_INLINE bool isnan_(double x) noexcept {
     return ((b >> 52) & 0x7FF) == 0x7FF && (b & 0x000FFFFFFFFFFFFFULL) != 0;
 }
 
+// Signaling NaN per IEEE 754-2008 §6.2.1: NaN bits with the most-significant
+// fraction bit (bit 51) clear. Used by IEEE-arithmetic public ops in the
+// SLEEF TUs (e.g. sf64_remainder) to raise SF64_FE_INVALID before quieting
+// the payload, per IEEE 754 §7.2.
+SF64_ALWAYS_INLINE bool is_snan_(double x) noexcept {
+    const uint64_t b = bits_of(x);
+    return ((b >> 52) & 0x7FF) == 0x7FF && (b & 0x000FFFFFFFFFFFFFULL) != 0 &&
+           (b & 0x0008000000000000ULL) == 0;
+}
+
 SF64_ALWAYS_INLINE bool isinf_(double x) noexcept {
     const uint64_t b = bits_of(x);
     return ((b >> 52) & 0x7FF) == 0x7FF && (b & 0x000FFFFFFFFFFFFFULL) == 0;

@@ -102,18 +102,6 @@ static inline bool nan_equiv_f32(float got, float expect) {
 
 // ---- fl2 helpers -------------------------------------------------------
 
-// sNaN detection (IEEE 754-2008 convention: qNaN quiet-bit set, sNaN clear).
-static inline bool is_snan_f64_bits(uint64_t b) {
-    const uint64_t exp = (b >> 52) & 0x7ffULL;
-    const uint64_t mant = b & 0x000fffffffffffffULL;
-    return exp == 0x7ffULL && mant != 0 && (mant & (1ULL << 51)) == 0;
-}
-static inline bool is_snan_f32_bits(uint32_t b) {
-    const uint32_t exp = (b >> 23) & 0xffu;
-    const uint32_t mant = b & 0x7fffffu;
-    return exp == 0xffu && mant != 0 && (mant & (1u << 22)) == 0;
-}
-
 // Berkeley softfloat fl2 bit layout (softfloat.h:85):
 //   inexact=1, underflow=2, overflow=4, infinite(divbyzero)=8, invalid=16.
 // sf64 layout (soft_f64.h): invalid=1, divbyzero=2, overflow=4, underflow=8,
@@ -258,10 +246,7 @@ static uint64_t run_f64_binop(const char* op, f64_binop fn, const std::vector<co
                           bits(got), v[2]);
             fail(op, n, line, detail);
         }
-        // Skip flag check if sNaN appears in inputs (sf64 doesn't raise
-        // INVALID on sNaN — deferred to 1.2).
-        const bool has_snan_input = is_snan_f64_bits(v[0]) || is_snan_f64_bits(v[1]);
-        if (kFlagsActive && !has_snan_input) {
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 char detail[160];
@@ -299,8 +284,7 @@ static uint64_t run_f64_unop(const char* op, double (*fn)(double),
                           bits(got), v[1]);
             fail(op, n, line, detail);
         }
-        const bool has_snan_input = is_snan_f64_bits(v[0]);
-        if (kFlagsActive && !has_snan_input) {
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 char detail[160];
@@ -342,9 +326,7 @@ static uint64_t run_f64_mulAdd(uint64_t n_cases) {
                           bits(got), v[3]);
             fail(op, n, line, detail);
         }
-        const bool has_snan_input =
-            is_snan_f64_bits(v[0]) || is_snan_f64_bits(v[1]) || is_snan_f64_bits(v[2]);
-        if (kFlagsActive && !has_snan_input) {
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 char detail[160];
@@ -801,10 +783,10 @@ static uint64_t run_f32_to_f64() {
             fail(op, n, line, detail);
         }
         // f32→f64 is always exact (mantissa fits, exp widens), so the only
-        // flag Berkeley ever raises is INVALID on sNaN input. sf64 silently
-        // quiets sNaN, so skip those vectors.
-        const bool has_snan_input = is_snan_f32_bits((uint32_t)v[0]);
-        if (kFlagsActive && !has_snan_input) {
+        // flag Berkeley ever raises is INVALID on sNaN input — sf64 raises
+        // INVALID on sNaN per IEEE 754 §6.2 / §7.2, so the comparison is
+        // direct.
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 char detail[160];
@@ -855,8 +837,7 @@ static uint64_t run_f64_to_f32() {
             }
             ++mismatches;
         }
-        const bool has_snan_input = is_snan_f64_bits(v[0]);
-        if (kFlagsActive && !has_snan_input) {
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 if (flag_mismatches == 0) {
@@ -916,8 +897,7 @@ static uint64_t run_f64_binop_rmode(const char* op, f64_binop_r fn, sf64_roundin
                           bits(got), v[2]);
             fail(op, n, line, detail);
         }
-        const bool has_snan_input = is_snan_f64_bits(v[0]) || is_snan_f64_bits(v[1]);
-        if (kFlagsActive && !has_snan_input) {
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 char detail[192];
@@ -956,8 +936,7 @@ static uint64_t run_f64_unop_rmode(const char* op, f64_unop_r fn, sf64_rounding_
                           bits(got), v[1]);
             fail(op, n, line, detail);
         }
-        const bool has_snan_input = is_snan_f64_bits(v[0]);
-        if (kFlagsActive && !has_snan_input) {
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 char detail[192];
@@ -1000,9 +979,7 @@ static uint64_t run_f64_mulAdd_rmode(uint64_t n_cases, sf64_rounding_mode m, con
                           bits(got), v[3]);
             fail(op, n, line, detail);
         }
-        const bool has_snan_input =
-            is_snan_f64_bits(v[0]) || is_snan_f64_bits(v[1]) || is_snan_f64_bits(v[2]);
-        if (kFlagsActive && !has_snan_input) {
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 char detail[192];
@@ -1132,8 +1109,7 @@ static uint64_t run_f64_to_f32_rmode(sf64_rounding_mode m, const char* mode_labe
             }
             ++mismatches;
         }
-        const bool has_snan_input = is_snan_f64_bits(v[0]);
-        if (kFlagsActive && !has_snan_input) {
+        if (kFlagsActive) {
             const unsigned got_flags = sf64_fe_getall();
             if (got_flags != expected_flags) {
                 if (flag_mismatches == 0) {

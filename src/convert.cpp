@@ -31,6 +31,7 @@ using soft_fp64::internal::extract_exp;
 using soft_fp64::internal::extract_frac;
 using soft_fp64::internal::extract_sign;
 using soft_fp64::internal::from_bits;
+using soft_fp64::internal::is_snan_bits;
 using soft_fp64::internal::kExpBias;
 using soft_fp64::internal::kExpMax;
 using soft_fp64::internal::kFracBits;
@@ -365,6 +366,11 @@ extern "C" double sf64_from_f32(float x) {
             return from_bits(pack(sign, kExpMax, 0));
         }
         // NaN — preserve payload and force quiet bit.
+        // IEEE 754 §6.2 / §7.2: format-conversion of a sNaN raises INVALID.
+        // f32 sNaN: bit 22 of the f32 mantissa clear (and frac != 0).
+        if ((frac32 & (1u << 22)) == 0u) {
+            SF64_FE_RAISE(SF64_FE_INVALID);
+        }
         const uint64_t payload = static_cast<uint64_t>(frac32) << 29;
         return from_bits(pack(sign, kExpMax, payload | kQuietNaNBit));
     }
@@ -407,6 +413,10 @@ SF64_ALWAYS_INLINE float to_f32_impl(double x, sf64_rounding_mode mode,
         if (frac64 == 0) {
             const uint32_t out = (sign << 31) | (0xFFu << 23);
             return __builtin_bit_cast(float, out);
+        }
+        // IEEE 754 §6.2 / §7.2: format-conversion of a sNaN raises INVALID.
+        if (is_snan_bits(b)) {
+            fe.raise(SF64_FE_INVALID);
         }
         const uint32_t payload = static_cast<uint32_t>(frac64 >> 29) & 0x7FFFFFu;
         const uint32_t out = (sign << 31) | (0xFFu << 23) | payload | 0x400000u;

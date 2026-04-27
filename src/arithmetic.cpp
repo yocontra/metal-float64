@@ -404,9 +404,13 @@ static SF64_ALWAYS_INLINE double add_r_impl(double a, double b, sf64_rounding_mo
     const uint32_t a_sign = extract_sign(ab);
     const uint32_t b_sign = extract_sign(bb);
 
-    // NaN propagation. (sNaN→INVALID wiring is deferred to 1.2 alongside
-    // SOFT_FP64_SNAN_PROPAGATE — the plan parks payload preservation there.)
+    // NaN propagation. IEEE 754 §7.2: any arithmetic op on a sNaN input
+    // raises INVALID before quieting the payload. (Payload-preservation
+    // beyond the quiet-bit set is parked for 1.2 with SOFT_FP64_SNAN_PROPAGATE.)
     if (is_nan_bits(ab) || is_nan_bits(bb)) {
+        if (is_snan_bits(ab) || is_snan_bits(bb)) {
+            fe.raise(SF64_FE_INVALID);
+        }
         return propagate_nan(ab, bb);
     }
 
@@ -488,8 +492,12 @@ static SF64_ALWAYS_INLINE double mul_r_impl(double a, double b, sf64_rounding_mo
     const uint32_t a_exp = extract_exp(ab);
     const uint32_t b_exp = extract_exp(bb);
 
-    if (is_nan_bits(ab) || is_nan_bits(bb))
+    if (is_nan_bits(ab) || is_nan_bits(bb)) {
+        if (is_snan_bits(ab) || is_snan_bits(bb)) {
+            fe.raise(SF64_FE_INVALID);
+        }
         return propagate_nan(ab, bb);
+    }
 
     if (a_exp == kExpMax || b_exp == kExpMax) {
         if (is_zero_bits(ab) || is_zero_bits(bb)) {
@@ -530,8 +538,12 @@ static SF64_ALWAYS_INLINE double div_r_impl(double a, double b, sf64_rounding_mo
     const uint32_t a_exp = extract_exp(ab);
     const uint32_t b_exp = extract_exp(bb);
 
-    if (is_nan_bits(ab) || is_nan_bits(bb))
+    if (is_nan_bits(ab) || is_nan_bits(bb)) {
+        if (is_snan_bits(ab) || is_snan_bits(bb)) {
+            fe.raise(SF64_FE_INVALID);
+        }
         return propagate_nan(ab, bb);
+    }
 
     const bool a_inf = (a_exp == kExpMax);
     const bool b_inf = (b_exp == kExpMax);
@@ -586,20 +598,25 @@ extern "C" double sf64_rem(double a, double b) {
     const uint64_t ab = bits_of(a);
     const uint64_t bb = bits_of(b);
 
-    // NaN.
+    // Stack-local accumulator; flushed to TLS at each return that might raise.
+    // rem is bit-exact on its output (no rounding step), so the only raises
+    // are the sNaN-input INVALID and the two INVALID edge cases below — the
+    // cost of the accumulator here is mainly so the mandatory round_and_pack
+    // call at the end has something to thread into (even though it's
+    // always exact).
+    sf64_internal_fe_acc fe;
+
+    // NaN. IEEE 754 §7.2: any sNaN input raises INVALID.
     if (is_nan_bits(ab) || is_nan_bits(bb)) {
+        if (is_snan_bits(ab) || is_snan_bits(bb)) {
+            fe.raise(SF64_FE_INVALID);
+            fe.flush();
+        }
         return propagate_nan(ab, bb);
     }
 
     const uint32_t a_exp = extract_exp(ab);
     const uint32_t b_exp = extract_exp(bb);
-
-    // Stack-local accumulator; flushed to TLS at each return that might raise.
-    // rem is bit-exact on its output (no rounding step), so the only raises
-    // are the two INVALID paths below — the cost of the accumulator here is
-    // mainly so the mandatory round_and_pack call at the end has something
-    // to thread into (even though it's always exact).
-    sf64_internal_fe_acc fe;
 
     // fmod(±inf, y) = NaN;  fmod(x, 0) = NaN;  fmod(x, ±inf) = x when x finite.
     if (a_exp == kExpMax) {

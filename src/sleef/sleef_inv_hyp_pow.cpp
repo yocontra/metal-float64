@@ -49,6 +49,7 @@ using soft_fp64::sleef::ddsqu_dd_dd;
 using soft_fp64::sleef::eq_;
 using soft_fp64::sleef::ge_;
 using soft_fp64::sleef::gt_;
+using soft_fp64::sleef::is_snan_;
 using soft_fp64::sleef::isinf_;
 using soft_fp64::sleef::isnan_;
 using soft_fp64::sleef::le_;
@@ -85,8 +86,13 @@ extern "C" double sf64_fmod(double x, double y) {
     // TLS. Preserves the pre-1.1 mask semantics without needing
     // sf64_fe_save/restore around the loop.
     soft_fp64::sleef::sf64_internal_fe_acc fe;
-    if (isnan_(x) || isnan_(y))
+    if (isnan_(x) || isnan_(y)) {
+        // IEEE 754 §7.2: sNaN input raises INVALID before payload propagation.
+        if (is_snan_(x) || is_snan_(y)) {
+            SF64_FE_RAISE(SF64_FE_INVALID);
+        }
         return qNaN();
+    }
     if (isinf_(x) || eq_(y, 0.0)) {
         SF64_FE_RAISE(SF64_FE_INVALID);
         return qNaN();
@@ -121,8 +127,13 @@ extern "C" double sf64_fmod(double x, double y) {
 // fmod + tie-break so the sign and parity rule match glibc / TestFloat.
 extern "C" double sf64_remainder(double x, double y) {
     soft_fp64::sleef::sf64_internal_fe_acc fe;
-    if (isnan_(x) || isnan_(y))
+    if (isnan_(x) || isnan_(y)) {
+        // IEEE 754 §7.2: sNaN input raises INVALID before payload propagation.
+        if (is_snan_(x) || is_snan_(y)) {
+            SF64_FE_RAISE(SF64_FE_INVALID);
+        }
         return qNaN();
+    }
     if (isinf_(x) || eq_(y, 0.0)) {
         SF64_FE_RAISE(SF64_FE_INVALID);
         return qNaN();
