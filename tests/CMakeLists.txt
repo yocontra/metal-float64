@@ -17,6 +17,7 @@ set(SF64_CORE_TESTS
     test_hypot_scaling
     test_reentrancy
     test_fenv
+    test_fenv_threads
 )
 
 find_package(Threads REQUIRED)
@@ -30,8 +31,9 @@ foreach(_test IN LISTS SF64_CORE_TESTS)
         if(${_test} STREQUAL "test_reentrancy")
             target_link_libraries(${_test} PRIVATE Threads::Threads)
         endif()
-        if(${_test} STREQUAL "test_fenv")
-            # test_fenv cross-thread subtest spawns std::thread workers.
+        if(${_test} STREQUAL "test_fenv" OR ${_test} STREQUAL "test_fenv_threads")
+            # test_fenv cross-thread subtest spawns std::thread workers;
+            # test_fenv_threads is a multi-threaded TLS isolation stress.
             target_link_libraries(${_test} PRIVATE Threads::Threads)
             # Pipe the build-time fenv mode selection into the test so it
             # can gate flag-set assertions (under `disabled` every raise is
